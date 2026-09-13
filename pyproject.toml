@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "idtb"
+version = "0.1.0"
+description = "Isaac Sim identifiability testbed: OU-sampled pairs with known Gaussian latents"
+# No requires-python pin: the Python version follows the Isaac Sim release, which
+# is resolved from the pod's driver reading (README §3.2).
+dependencies = ["torch"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/idtb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-q", "--strict-markers", "-m", "not isaac"]
+markers = ["isaac: needs a live Isaac Sim runtime; pod only, deselected by default"]
+
+[tool.ruff]
+line-length = 100
+# Prose, not source: the formatter otherwise rewrites snippets inside code fences.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "TID"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+# TID253. SimulationApp must exist before any of these are imported (README §4.2),
+# so sim-touching modules import them inside functions. A module-level import here
+# kills pytest at collection time -- on a machine where Isaac cannot be installed.
+banned-module-level-imports = ["isaacsim", "isaaclab", "omni", "carb", "pxr"]

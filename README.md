@@ -56,6 +56,10 @@ The purpose of this section is to keep the plan honest about the difference betw
 | Isaac Lab is used for the asset/state layer; raw `carb` settings for the render layer | §4.4. Isaac Lab gives batched tensorised state writes with read-back; it does not expose path-tracing controls. |
 | The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. |
 | Tests accompany every module; the §10.1 correctness gates are executable tests | §10.3. |
+| One installable package `src/idtb/`, never top-level `sim`/`gen`/`eval` | Those names collide with Kit extensions on Isaac's `sys.path`, and `eval` shadows a builtin. §4.6. |
+| Handles are keyed by **role** (`arm.j0`, `cube.x`), not by Franka joint name | §6.2. A spec keyed on asset-specific names cannot be shared with the mock, which makes the tier-1 contract suite impossible. |
+| Module-level `isaaclab`/`omni`/`carb`/`pxr` imports are banned mechanically | §4.2. Ruff TID253 catches the syntax; `tests/test_import_guard.py` imports every module with those roots blocked, catching the rest. A violation is otherwise only discoverable on the pod. |
+| Isaac is not pip-installable into our environment, by construction | A local install would misrepresent what is actually runnable, and the constraint in §1 is the whole reason the seam exists. |
 
 ### 3.2 Deferred — recorded here so that de-pinning does not lose the question
 
@@ -122,13 +126,13 @@ Two architectural properties matter:
 
 `SimulationApp` must be constructed **before any `isaaclab.*` or `omni.*` import**. It is process-global, one-shot, and cannot be restarted within a process. Three consequences shape every file:
 
-1. **No Isaac imports at module top level, anywhere in reusable code.** Sim-touching modules import Isaac *inside* functions. A top-level `import isaaclab` in `src/sim/writer.py` would kill `pytest` at collection time on a developer machine — where, per §1, Isaac cannot be installed at all.
-2. **Entry points are scripts; libraries are pure.** `src/gen/generate.py` boots the app and *then* imports. `src/latents/*` and `src/eval/*` never touch Isaac.
+1. **No Isaac imports at module top level, anywhere in reusable code.** Sim-touching modules import Isaac *inside* functions. A top-level `import isaaclab` in `src/idtb/sim/writer.py` would kill `pytest` at collection time on a developer machine — where, per §1, Isaac cannot be installed at all.
+2. **Entry points are scripts; libraries are pure.** `src/idtb/gen/generate.py` boots the app and *then* imports. `src/idtb/latents/*` and `src/idtb/analysis/*` never touch Isaac.
 3. **One app per process.** Isaac-dependent tests run in a single session under Isaac's own interpreter, with a session-scoped fixture owning the app.
 
 ### 4.3 The backend seam
 
-Defined in `src/sim/backend.py` — pure Python, zero Isaac imports:
+Defined in `src/idtb/sim/backend.py` — pure Python, zero Isaac imports:
 
 ```python
 class SceneBackend(Protocol):
@@ -145,14 +149,14 @@ class SceneBackend(Protocol):
 
 The mock is not a convenience. It does two jobs:
 
-1. It gives a local development and CI loop for the OU sampler, the squash, the shard writer, the generation driver, the metrics and the LeJEPA training code — which is most of the project.
+1. It gives a local development and test loop for the OU sampler, the squash, the shard writer, the generation driver, the metrics and the LeJEPA training code — which is most of the project.
 2. It gives the correctness gates a **known-good reference**. A determinism gate that has never been observed to pass on something that should pass is not evidence. Running the same contract suite against the mock (must pass) and against Isaac (must also pass) is what makes the Isaac result meaningful.
 
 ### 4.4 The Isaac API surface we actually need
 
 Deliberately small. This is the complete list; anything outside it is out of scope.
 
-**Boot** — `src/sim/app.py`, the only module permitted to do this
+**Boot** — `src/idtb/sim/app.py`, the only module permitted to do this
 - `isaaclab.app.AppLauncher`, `AppLauncher.add_app_launcher_args(parser)`, `app_launcher.app`, `simulation_app.close()`
 - Flags: `headless=True`, `enable_cameras=True` (required for sensor rendering in standalone scripts), `renderer=…`
 
@@ -181,7 +185,7 @@ Deliberately small. This is the complete list; anything outside it is out of sco
 - `data_types`: `"rgb"`, `"semantic_segmentation"`, `"instance_segmentation_fast"`, `"distance_to_image_plane"`
 - `camera.data.intrinsic_matrices` — logged to dataset metadata
 
-**Render control** — drops below Isaac Lab into `carb`, contained entirely in `src/sim/render.py`
+**Render control** — drops below Isaac Lab into `carb`, contained entirely in `src/idtb/sim/render.py`
 - `carb.settings.get_settings().set("/rtx/rendermode", …)`
 - `/rtx/pathtracing/spp`, `/rtx/pathtracing/totalSpp`, `/rtx/post/dlss/execMode`
 - `RenderCfg(antialiasing_mode=…, enable_dl_denoiser=…, samples_per_pixel=…, carb_settings={…})`
@@ -208,39 +212,48 @@ Two unknowns, both Phase-1 spikes (§7.2): whether `sim.forward()` alone suffice
 ### 4.6 Repository layout
 
 ```
-identifiability/
-├── scenes/
-│   ├── stage_v1_tabletop.usd        # table + franka + cube
-│   ├── stage_v2_room.usd            # references v1, adds room shell
-│   └── materials/                   # PBR material library
-├── src/
-│   ├── latents/                     # pure python, no Isaac
-│   │   ├── spec.py                  # LatentSpec: dims, handles, ranges
-│   │   ├── squash.py                # φ: R^n → physical state (absorbed into g)
+lejepa_identifiability/
+├── src/idtb/                        # one package: top-level `sim`/`gen`/`eval`
+│   │                                # would collide with Kit extensions on
+│   │                                # Isaac's sys.path, and `eval` is a builtin
+│   ├── latents/                     # pure python, no Isaac          ✅ built
+│   │   ├── spec.py                  # Handle, LatentSpec: roles, squash φ
 │   │   └── ou.py                    # OU pair sampler
-│   ├── sim/
-│   │   ├── backend.py               # SceneBackend protocol — pure python
-│   │   ├── mock.py                  # MockSceneBackend — analytic, local
-│   │   ├── app.py                   # SimulationApp bootstrap (headless)
-│   │   ├── scene.py                 # scene load + handle resolution
-│   │   ├── writer.py                # state teleport
-│   │   └── render.py                # deterministic capture; the only carb consumer
-│   ├── gen/
-│   │   └── generate.py              # dataset driver, sharded output
-│   └── eval/
-│       ├── train_lejepa.py
-│       └── metrics.py               # R², ortho err, ε, δ, bound
+│   ├── sim/                         # backend.py (protocol) · mock.py · app.py
+│   │                                # scene.py · writer.py · render.py
+│   ├── gen/                         # generate.py — dataset driver, sharded
+│   └── analysis/                    # LeJEPA training · metrics
+├── spikes/
+│   └── spike_api.py                 # one standalone Isaac contact script
 ├── tests/
-│   ├── test_ou.py, test_squash.py   # tier 0 — pure
+│   ├── test_ou.py, test_spec.py     # tier 0 — pure                  ✅ built
+│   ├── test_import_guard.py         # tier 0 — §4.2 enforced         ✅ built
 │   ├── contract/                    # tier 1 — parametrized over backend
-│   └── isaac/                       # tier 2 — remote only
-├── configs/                         # hydra/yaml: ρ, λ, n, render preset
-├── docker/
-│   └── Dockerfile
-└── infra/
-    ├── pod.md                       # pod config notes
-    └── entrypoint.sh
+│   └── isaac/                       # tier 2 — pod only
+├── scenes/                          # stage_v1_tabletop.usd, materials/
+├── configs/                         # ρ, λ, n, render preset
+├── infra/
+│   ├── preflight.sh                 # read-only pod survey           ✅ built
+│   └── bootstrap.sh                 # caches onto the volume, checkout ✅ built
+└── docs/PLAN.md                     # ordered checklist for the current milestone
 ```
+
+No Dockerfile: NVIDIA ships a prebuilt headless `isaac-lab` image on NGC, so the
+image is pulled and our code lives on the volume (§8.3).
+
+### 4.7 Local development
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/pytest          # tier 0; the isaac marker is deselected by default
+.venv/bin/ruff check .    # includes TID253, the module-level Isaac import ban
+```
+
+Both are run by hand before a commit — there is no hosted CI (§10.3).
+
+No version is pinned: the Python version follows the Isaac Sim release (§3.2), and
+the tier-0 layer must not depend on either. Torch installs on macOS; Isaac does
+not, and deliberately cannot — see §1.
 
 ---
 
@@ -267,6 +280,8 @@ Theorem 1 requires *z ~ N(0, Iₙ)* exactly. But a Franka joint lives in a bound
 > Because the theory allows *g* to be *any* measurable nonlinear map (their Hermite argument needs only measurability, not diffeomorphism), the squash is legitimately part of the unknown mixing. The latents stay exactly Gaussian, every sampled state is physically valid by construction, and there is no wrapping. The encoder's job is simply harder — it must invert the squash too, which is a genuine test of the theory rather than a violation of it.
 
 Use `tanh` rather than a hard clip: `tanh` is a bijection onto the open interval, so *φ* is injective and *g* retains injectivity. A clip would map an entire tail to a single point and destroy it.
+
+> **The float32 caveat.** `tanh` is injective in exact arithmetic, but in float32 the physical step per unit of latent falls below any write tolerance long before overflow — past |z| ≈ 5 — and rounds to the bound exactly past |z| ≈ 9. Distinct latents then teleport the scene to the *same* state, and *g* is non-injective there for a purely numerical reason. `LatentSpec.saturated(phi, atol=…)` flags it, measured in **physical** units against the same tolerance as the read-back gate. Never in latent space: `atanh` turns a micron of solver tolerance into an unbounded latent error. Saturation is logged per sample like visibility and collision, so it can be conditioned on rather than guessed at.
 
 ### 5.2 Stage-1 latent specification (n = 7)
 
@@ -326,20 +341,19 @@ Three options, and the first is recommended:
 Direct transcription of Eq. (1) of the paper. Trivial code, but note the batching and the single shared ρ.
 
 ```python
-# src/latents/ou.py
-import torch
-
-def sample_ou_pairs(n: int, batch: int, rho: float,
-                    device="cpu", generator=None):
+# src/idtb/latents/ou.py  (shipped)
+def sample_ou_pairs(n, batch, rho, *, device="cpu", dtype=torch.float32, generator=None):
     """z ~ N(0, I_n);  z' = rho*z + sqrt(1-rho^2)*eta,  eta ~ N(0, I_n).
 
     Single scalar rho across all dims -> isotropic transition, required
     for simultaneous (parallel) identifiability. See paper App. F.
     """
-    z = torch.randn(batch, n, device=device, generator=generator)
-    eta = torch.randn(batch, n, device=device, generator=generator)
-    z_next = rho * z + (1.0 - rho ** 2) ** 0.5 * eta
-    return z, z_next
+    if not 0.0 <= rho <= 1.0:
+        raise ValueError(f"rho must lie in [0, 1], got {rho!r}")
+    kwargs = {"device": device, "dtype": dtype, "generator": generator}
+    z = torch.randn(batch, n, **kwargs)
+    eta = torch.randn(batch, n, **kwargs)
+    return z, rho * z + (1.0 - rho**2) ** 0.5 * eta
 ```
 
 Sanity assertions kept in the test suite: `Cov(z) ≈ I`, `Cov(z′) ≈ I`, `Cov(z, z′) ≈ ρI`, and marginal normality per dimension. If any fails, the entire downstream analysis is meaningless.
@@ -347,44 +361,38 @@ Sanity assertions kept in the test suite: `Cov(z) ≈ I`, `Cov(z′) ≈ I`, `Co
 ### 6.2 Latent specification and squash
 
 ```python
-# src/latents/spec.py
-from dataclasses import dataclass
-import torch
-
-@dataclass
+# src/idtb/latents/spec.py  (shipped)
+@dataclass(frozen=True)
 class Handle:
-    kind: str          # "joint" | "root_xy" | "root_pose"
-    asset: str         # scene key, e.g. "robot" / "cube"
-    name: str | None   # joint name, resolved to an index at bind time
+    role: str          # backend-independent: "arm.j0", "cube.x"
     center: float
     radius: float      # tanh amplitude
+    # Handle.from_limits(role, lo, hi, fraction) builds these from *measured*
+    # limits, so no radius is ever an absolute number baked into code.
 
+@dataclass(frozen=True)
 class LatentSpec:
     """Registry mapping latent dims -> physical handles.
     Adding an object == appending handles. n grows, nothing else changes."""
-    def __init__(self, handles: list[Handle]):
-        self.handles = handles
+    handles: tuple[Handle, ...]
 
-    @property
-    def n(self) -> int:
-        return len(self.handles)
+    def squash(self, z):                 # phi: R^n -> physical values
+        center, radius = self._params(z)
+        return center + radius * torch.tanh(z)
 
-    def squash(self, z: torch.Tensor) -> torch.Tensor:
-        """phi: R^n -> physical values. Monotonic bijection per dim, so
-        injectivity of g is preserved. Absorbed into the mixing map."""
-        c = torch.tensor([h.center for h in self.handles], device=z.device)
-        r = torch.tensor([h.radius for h in self.handles], device=z.device)
-        return c + r * torch.tanh(z)
+    def saturated(self, phi, *, atol):   # float32 injectivity diagnostic, §5.1
+        center, radius = self._params(phi)
+        return radius - (phi - center).abs() < atol
 ```
 
-Handles carry joint **names**, not indices. Indices are resolved once at bind time via `robot.find_joints(...)`; hardcoded indices are a silent-corruption hazard because they change with asset revisions.
+Handles carry **roles**, not joint names and never indices. The backend owns the role → target mapping — the Isaac backend resolves `arm.j0` to a joint index once at bind time via `robot.find_joints(...)`, the mock to a sprite parameter. A spec keyed on `panda_joint1` could not be shared with the mock, which has no Franka, and the tier-1 contract suite (§10.3) exists precisely to run one set of tests against both. Hardcoded indices are a silent-corruption hazard: they change with asset revisions.
 
 ### 6.3 State writer
 
 Sketch, structured to match §4.5. Two points of care: root poses are in **world** frame so the environment origin must be added, and the root pose is a 7-vector whose orientation is a **normalised (w, x, y, z) quaternion** — not something to leave uninitialised while writing only x and y.
 
 ```python
-# src/sim/writer.py  (sketch — imports Isaac lazily, inside the function)
+# src/idtb/sim/writer.py  (sketch — imports Isaac lazily, inside the function)
 def write_latent_state(scene, bound_spec, phi_vals):
     """Teleport the scene to the physical state encoded by phi_vals.
     phi_vals: [B, n] already squashed. No physics stepping."""
@@ -418,7 +426,7 @@ def write_latent_state(scene, bound_spec, phi_vals):
 ### 6.4 Generation loop
 
 ```python
-# src/gen/generate.py  (sketch — backend is a SceneBackend, real or mock)
+# src/idtb/gen/generate.py  (sketch — backend is a SceneBackend, real or mock)
 for shard in range(n_shards):
     z, z_next = sample_ou_pairs(spec.n, batch, rho, generator=g)
 
@@ -530,35 +538,18 @@ Practically, this narrows to RTX-class parts (GeForce RTX 40/50 series, L40S, RT
 
 ### 8.3 Container and volumes
 
-The image tag and Isaac Lab branch are intentionally left as build arguments, resolved by the Phase-0 driver check:
+**No custom image.** NVIDIA ships a prebuilt headless `nvcr.io/nvidia/isaac-lab` image on NGC with Isaac Sim and Isaac Lab already installed; building our own would only re-do that work and add a second thing to keep matched to the driver. The tag is resolved in Phase 0 from the driver reading and recorded in §3.1 — nowhere else. Our code is not baked into an image at all: it lives on the network volume and is checked out by `infra/bootstrap.sh`, so a code change is a `git pull`, not a rebuild.
 
-```dockerfile
-# docker/Dockerfile
-ARG ISAAC_SIM_TAG          # resolved in Phase 0 from the driver check
-FROM nvcr.io/nvidia/isaac-sim:${ISAAC_SIM_TAG}
+Two scripts, both idempotent and both written to run on a pod nobody has logged into yet:
 
-ARG ISAAC_LAB_REF          # the Isaac Lab release matching ISAAC_SIM_TAG
-
-ENV ACCEPT_EULA=Y \
-    PRIVACY_CONSENT=Y \
-    OMNI_KIT_ACCEPT_EULA=YES
-
-RUN git clone --depth 1 --branch ${ISAAC_LAB_REF} \
-        https://github.com/isaac-sim/IsaacLab.git /workspace/IsaacLab
-WORKDIR /workspace/IsaacLab
-RUN ./isaaclab.sh --install
-
-COPY . /workspace/identifiability
-WORKDIR /workspace/identifiability
-```
-
-Once Phase 0 resolves both, record the values **here in this document** as well as in the build, so the plan and the build cannot drift.
+- **`infra/preflight.sh`** — read-only survey: driver version, GPU part, VRAM, OS, egress to NGC / the Omniverse CDN / PyPI, and volume ownership and free space. Every check runs even after one fails, and the verdict block is what gets pasted back. It hard-fails an RT-core-less GPU (A100/H100 and friends) rather than letting a cheap allocation look fine.
+- **`infra/bootstrap.sh`** — takes ownership of the volume, relocates every cache onto it (Kit/asset, GL shader, CUDA compute, Omniverse app data, pip) by symlinking the home paths at the volume, creates the dataset and log directories, and checks out the repo.
 
 > ### Persistent volume layout — do not skip this
 >
-> Rented pods are ephemeral. Without a network volume, every pod start re-downloads gigabytes of Omniverse assets and recompiles shader caches, costing paid GPU time on every session. Mount a network volume and bind the Kit/shader cache, the Omniverse asset cache, the pip cache, generated datasets, and the USD stages into it.
+> Rented pods are ephemeral. Without a network volume, every pod start re-downloads gigabytes of Omniverse assets and recompiles shader caches, costing paid GPU time on every session. Mount a network volume and put the Kit/shader cache, the Omniverse asset cache, the CUDA compute cache, the pip cache, generated datasets and the USD stages on it. `infra/bootstrap.sh` does this by symlinking the home paths at the volume, which works on providers that give you one mount and no control over individual bind mounts.
 >
-> Note that recent Isaac Sim containers run as a **non-root user by default**. Older tutorials' compose files assume root and will produce permission errors on mounted volumes. Set ownership in the entrypoint.
+> Note that recent Isaac Sim containers run as a **non-root user by default**. Older tutorials' compose files assume root and will produce permission errors on mounted volumes. `infra/bootstrap.sh` takes ownership first, before touching anything else.
 
 ### 8.4 Operating pattern and cost
 
@@ -578,11 +569,11 @@ Treat the GPU as a batch renderer, not a development environment. Per §1 this i
 | Phase | Deliverable | Contents | Effort |
 |---|---|---|---|
 | **0** | Pre-flight | NGC account; candidate pod; `nvidia-smi` driver reading; **resolve the Isaac Sim / Isaac Lab / Python versions from that reading and record them in §3**; container pulls and launches headless; one frame rendered to disk. | 0.5–1 day |
-| **0b** | Pure layers *(parallel, local, no GPU)* | `SceneBackend` protocol, `MockSceneBackend`, OU sampler, `LatentSpec` + squash, shard writer, tier-0 and tier-1-mock tests green. **Blocked on nothing.** | 2 days |
-| **1** | Infrastructure + spikes | Dockerfile with resolved build args; network volume with cache bind mounts; entrypoint handling non-root permissions; repeatable pod launch. **Spikes 1–4 (§7.2) answered and recorded in §3.** | 2–3 days |
+| **0b** | Pure layers *(parallel, local, no GPU)* | OU sampler, `LatentSpec` + squash, package scaffolding, the §4.2 import guard, pod scripts, tier-0 tests green. **Blocked on nothing — done.** | 2 days |
+| **1** | Infrastructure + spikes | Vendor `isaac-lab` image pulled at the resolved tag; network volume with caches relocated onto it; `infra/bootstrap.sh` handling non-root permissions; repeatable pod launch. **Spikes 1–4 (§7.2) answered and recorded in §3.** | 2–3 days |
 | **2** | Scene v1 | `stage_v1_tabletop.usd`: table, Franka, cube, PBR materials, HDRI + area lights, camera rig (2–3 views). Debug-preset renders look right. | 1–2 days |
-| **3** | Latent layer, real backend | `IsaacSceneBackend`: handle resolution by name, state writer, read-back assertions confirming every write landed. Collision and visibility diagnostics. Tier-1 contract suite green against Isaac. | 2 days |
-| **4** | Determinism gate | Deterministic capture path; the §7.1 acceptance test passing in CI for every preset intended for dataset use. | 1–2 days |
+| **3** | Backend seam + real backend | `SceneBackend` protocol and `MockSceneBackend`, designed against the spike's measurements rather than against documentation; then `IsaacSceneBackend`: handle resolution by name, state writer, read-back assertions confirming every write landed. Collision and visibility diagnostics. Tier-1 contract suite green against Isaac. | 2 days |
+| **4** | Determinism gate | Deterministic capture path; the §7.1 acceptance test passing for every preset intended for dataset use, called by `generate.py` itself and not only by the test suite. | 1–2 days |
 | **5** | OU generator | Sharded writer storing (x, x′, z, z′, visibility, collision, ρ, seed, intrinsics); per-shard checkpointing. | 2 days |
 | **6** | First dataset | ~100k pairs at `standard`, ρ = 0.95 (a starting point, not a finding). Visual audit of a random sample grid. | 0.5–1 day compute |
 | **7** | Analysis | LeJEPA/SIGReg training; metrics: R²(h→z), R²(z→h), ‖Q̂ᵀQ̂−I‖_F/√n, ε, δ, bound D + (ε+D)². **First real number.** | 2–3 days |
@@ -592,7 +583,11 @@ Treat the GPU as a batch renderer, not a development environment. Per §1 this i
 
 **Critical path to a first defensible result: Phases 0–7, approximately two weeks.** Phases 8–10 are where the scientific contribution lives.
 
-Note that Phase 0b has no dependency on Phase 0 — the pure layers and the mock can be built while the GPU question is still open. This is the practical payoff of the seam: the version decision blocks almost nothing.
+Note that Phase 0b has no dependency on Phase 0 — the pure layers can be built while the GPU question is still open. This is the practical payoff of the seam: the version decision blocks almost nothing.
+
+One deliberate re-ordering against an earlier draft: **the `SceneBackend` protocol and the mock are built in Phase 3, after the spike, not in Phase 0b.** Every Isaac signature in §4.4 came from reading documentation, never from running anything. The risk was never the method *names* — it is granularity and semantics, which only the spike settles. Designing the central abstraction against guesses and then discovering the guesses were wrong is the expensive order.
+
+`docs/PLAN.md` carries the ordered task list for the current milestone, including who runs what; this table stays the plan of record.
 
 ---
 
@@ -632,6 +627,7 @@ Mechanics:
 
 - Tier 2 and the Isaac half of tier 1 are marked `@pytest.mark.isaac` and deselected by default.
 - A **session-scoped fixture** owns the single `SimulationApp` (§4.2); tests must not attempt to create a second.
+- **No hosted CI.** The suite is run by hand — locally before a commit, and on the pod for the Isaac tiers. The §10.1 gates therefore live in `src/` and are called by `generate.py`, so a gate cannot be skipped just because nobody ran `pytest`; the tests and the generator call the same function.
 - Tier 1 is the payoff of the seam: the §10.1 gates become executable contracts that the mock **must pass** and the Isaac backend **must also pass**. A gate only observed against one implementation is weak evidence.
 
 ---
@@ -640,7 +636,7 @@ Mechanics:
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Temporal denoiser leaks information between x and x′ | Critical | Determinism acceptance test as a CI gate (§7.1). Aggravated by being the *default* renderer behaviour — must be actively disabled, then measured. |
+| Temporal denoiser leaks information between x and x′ | Critical | Determinism acceptance test, run by `generate.py` before every dataset run rather than only in the test suite (§7.1). Aggravated by being the *default* renderer behaviour — must be actively disabled, then measured. |
 | Silent state-write failure (object frozen at env origin, `fix_root_link`, kinematic flags) | Critical | Read-back assertion on every sample in development (§6.3). Known open upstream issue with no fix. |
 | Provisioned a GPU without RT cores | Critical | Hard rule: RT-core GPUs only. Verify in Phase 0 before any other work. |
 | No local runtime → slow, blind iteration on Isaac code | High | `MockSceneBackend` and the tier-0/tier-1 split (§4.3, §10.3); Phase 0b runs in parallel with Phase 0. |
@@ -671,10 +667,9 @@ Two tracks, and they are independent.
 
 **Track B — build what needs no decisions (local, start now):**
 
-1. `SceneBackend` protocol and `MockSceneBackend`.
-2. OU sampler, `LatentSpec`, squash — with tier-0 tests.
-3. The tier-1 contract suite, green against the mock.
-4. The generation driver and shard writer, exercised end-to-end against the mock.
+1. ~~OU sampler, `LatentSpec`, squash — with tier-0 tests.~~ **Done.** Plus the package scaffolding, the §4.2 import guard as an executable test, and the two pod scripts Track A needs.
+2. `spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast. Written blind, run by Track A.
+3. Then, against what the spike measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.
 
 > ### Closing note on sequencing
 >

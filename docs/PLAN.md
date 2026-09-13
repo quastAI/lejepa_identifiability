@@ -4,7 +4,7 @@
 
 ## Context
 
-The repo has **no source code** yet — only README.md, LICENSE, and the paper PDF.
+Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 below is now built; Phase 2 onwards is open.
 
 Every Isaac API signature in README §4.4 came from reading docs, **never from running anything**. So: meet the Isaac API first in one spike script, then design the protocol against verified reality. The README's current order (protocol + mock first, Isaac at Phase 3) would mean designing the central abstraction against guesses.
 
@@ -24,18 +24,21 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 ---
 
-## Phase 1 — Local foundations (no GPU, start now)
+## Phase 1 — Local foundations (no GPU, start now) — ✅ done
 
-- [ ] 🤖 **Scaffolding** — `pyproject.toml`, pytest config, ruff, `.gitignore` additions, empty `src/idtb/` tree
+- [x] 🤖 **Scaffolding** — `pyproject.toml` (hatchling, src layout), pytest config with the `isaac` marker deselected by default, ruff, `src/idtb/` tree
   - Single package `idtb`, not top-level `sim`/`eval`/`gen` — those collide with Kit extensions on Isaac's `sys.path`, and `eval` shadows a builtin
   - Isaac packages must never be pip-installable, so a local install can't misrepresent what's runnable
-- [ ] 🤖 **Import guard** — ruff rule banning module-level `isaaclab`/`omni`/`carb`/`pxr` imports, plus a test that imports every module with those roots blocked in a subprocess
+  - No Python version pin anywhere: it follows the Isaac Sim release, resolved in Phase 2
+- [x] 🤖 **Import guard** — ruff TID253 bans module-level `isaaclab`/`omni`/`carb`/`pxr`/`isaacsim`; `tests/test_import_guard.py` imports every module in a subprocess with those roots blocked by a meta-path finder, and asserts the blocker itself fires first
   - Guards a [known unresolved upstream bug](https://github.com/isaac-sim/IsaacLab/issues/3239): pytest collection imports Isaac before `SimulationApp` starts. A violation is otherwise only discovered on the pod, costing a container restart.
-- [ ] 🤖 **OU sampler + tests** — paper Eq. (1), single scalar ρ (isotropy). Tests: `Cov(z)≈I`, `Cov(z,z′)≈ρI`, ρ=0 → independent, ρ=1 → exact equality, seeded reproducibility
-- [ ] 🤖 **LatentSpec + squash + tests** — two corrections to README §5.1 built in:
-  - Handles keyed by **role** (`arm.j0`, `cube.x`), not Franka joint names — the mock has no Franka, so a spec keyed on `panda_joint1` makes the dual-backend test suite impossible
-  - `tanh` is injective in exact arithmetic but **not in float32** past |z|≈5 → add a `saturation` diagnostic, and gate read-back in **physical** space (`atanh` amplifies micron tolerances into huge latent errors)
-- [ ] 🤖 **Pod scripts** — `infra/preflight.sh` (read-only checks) and `infra/bootstrap.sh` (chown volume, point caches at it, pull repo)
+- [x] 🤖 **OU sampler + tests** — `idtb.latents.sample_ou_pairs`, paper Eq. (1), single scalar ρ. Tests: `Cov(z)≈I`, `Cov(z,z′)≈ρI`, per-dim KS normality, ρ=0 → independent, ρ=1 → bitwise equality, seeded reproducibility, ρ outside [0,1] rejected
+- [x] 🤖 **LatentSpec + squash + tests** — `idtb.latents.{Handle, LatentSpec}`, both corrections to README §5.1 built in:
+  - Handles keyed by **role** (`arm.j0`, `cube.x`); `Handle.from_limits(role, lo, hi, fraction)` so no radius is ever an absolute number in code
+  - `saturated(phi, atol=…)` flags where float32 `tanh` has collapsed injectivity, in **physical** space. A test pins the real boundary: `squash(9.0) == squash(12.0)` in float32, and both are flagged
+- [x] 🤖 **Pod scripts** — `infra/preflight.sh` (read-only, never fails fast, hard-fails an RT-core-less GPU) and `infra/bootstrap.sh` (chown volume, relocate all caches onto it by symlink, checkout)
+
+**README updated in the same change:** §3.1 gained four decided rows, §4.6 the real layout, §4.7 the dev loop, §5.1 the float32 caveat, §6.1–6.2 the shipped code, §8.3 the vendor-image decision, §9/§12 the re-sequencing.
 
 **Done when:** `pytest` green locally, zero collection errors.
 
