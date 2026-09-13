@@ -8,7 +8,9 @@
 # Exit status is 1 if a hard rule is violated (see VERDICT), 0 otherwise.
 set -uo pipefail
 
-VOL="${IDTB_VOL:-/workspace}"
+# Not /workspace: the vendor isaac-lab image unpacks Isaac Lab into
+# /workspace/isaaclab, so a volume mounted there shadows it (README §8.3).
+VOL="${IDTB_VOL:-/idtb}"
 problems=()
 
 section() { printf '\n=== %s ===\n' "$1"; }
@@ -53,8 +55,31 @@ for url in https://nvcr.io/v2/ \
   [[ "$code" == "000" ]] && fail "no egress to $url"
 done
 
+section "isaac image"
+# Only meaningful when this runs inside nvcr.io/nvidia/isaac-lab; on a bare pod
+# these are all absent, which is fine -- it just means the image is not up yet.
+SIM_ROOT="${ISAACSIM_ROOT_PATH:-/isaac-sim}"
+LAB_PATH="${ISAACLAB_PATH:-/workspace/isaaclab}"
+if [[ -d "$SIM_ROOT" ]]; then
+  fact "isaac sim root" "$SIM_ROOT"
+  fact "isaaclab.sh" "$([[ -x "$LAB_PATH/isaaclab.sh" ]] && echo "$LAB_PATH/isaaclab.sh" || echo "MISSING at $LAB_PATH")"
+  [[ -x "$LAB_PATH/isaaclab.sh" ]] \
+    || fail "$LAB_PATH/isaaclab.sh missing -- is a volume mounted over /workspace?"
+  # Kit aborts on a root uid without this; the image runs as root by default.
+  fact "OMNI_KIT_ALLOW_ROOT" "${OMNI_KIT_ALLOW_ROOT:-<unset>}"
+  [[ "$(id -u)" == "0" && -z "${OMNI_KIT_ALLOW_ROOT:-}" ]] \
+    && fail "running as root without OMNI_KIT_ALLOW_ROOT=1 -- Kit will refuse to start"
+  fact "ACCEPT_EULA" "${ACCEPT_EULA:-<unset>}"
+  [[ -z "${ACCEPT_EULA:-}" ]] \
+    && fail "ACCEPT_EULA unset -- set it as a pod env var, the image requires it"
+else
+  fact "isaac sim root" "absent -- not running inside the isaac-lab image"
+fi
+
 section "volume ($VOL)"
-if [[ ! -d "$VOL" ]]; then
+if [[ "$VOL" == "/workspace" || "$VOL" == /workspace/* ]]; then
+  fail "volume at $VOL shadows the image's /workspace/isaaclab -- recreate the pod with the volume mounted elsewhere (e.g. /idtb)"
+elif [[ ! -d "$VOL" ]]; then
   fail "$VOL does not exist -- is the network volume attached?"
 else
   fact "device" "$(df -h "$VOL" | awk 'NR==2 {print $1}')"

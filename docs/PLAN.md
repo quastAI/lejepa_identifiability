@@ -4,7 +4,7 @@
 
 ## Context
 
-Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 below is now built; Phase 2 onwards is open.
+Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 is built and Phase 2's version question is resolved; what remains of Phase 2 is a pod session, and Phase 3 onwards is open.
 
 Every Isaac API signature in README §4.4 came from reading docs, **never from running anything**. So: meet the Isaac API first in one spike script, then design the protocol against verified reality. The README's current order (protocol + mock first, Isaac at Phase 3) would mean designing the central abstraction against guesses.
 
@@ -44,19 +44,43 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 ---
 
-## Phase 2 — Pod setup
+## Phase 2 — Pod setup — 🟡 versions resolved, pod not yet on the vendor image
 
 > **No Dockerfile needed.** NVIDIA ships a prebuilt headless `nvcr.io/nvidia/isaac-lab` image on NGC. README §8.3's custom image is unnecessary — pull the vendor image, put our code on the volume.
 
-- [ ] 🧑 **Pick the datacenter by RT-core GPU availability, *then* create the network volume**
-  - A volume pins you to its DC. Create it first and you can end up with storage in a region that has no RTX stock.
-  - **A100/H100 are unsupported by Isaac Sim** — do not provision regardless of price
-- [ ] 🧑 **Launch the pod**, confirm the allocated GPU is the advertised part
-- [ ] 🧑🤖 **Run `infra/preflight.sh`, paste the output** — driver version, GPU, VRAM, egress, volume permissions
-- [ ] 🤖 **Resolve versions from the driver reading** — Isaac Sim release, Isaac Lab release, Python version. *The driver decides the version, not the other way round.*
-- [ ] 🤖 **README checkpoint 1** — move those four rows from §3.2 (Deferred) to §3.1 (Decided)
-- [ ] 🧑 **Pull the image, run `bootstrap.sh`**, then stop/restart the pod and confirm caches survived (no re-download)
+- [x] 🧑 **Pick the datacenter by RT-core GPU availability, *then* create the network volume**
+- [x] 🧑 **Launch the pod**, confirm the allocated GPU is the advertised part — RTX 4090, 24 GB, CC 8.9
+- [x] 🧑🤖 **Run `infra/preflight.sh`, paste the output** — all checks passed; the full survey is recorded in README §8.1
+- [x] 🤖 **Resolve versions from the driver reading** — **Isaac Sim 6.0.0, Isaac Lab 3.0.0-beta2, Python 3.12**, image `nvcr.io/nvidia/isaac-lab:3.0.0-beta2`
+  - The driver *does* decide it, one layer deeper than expected: 580.178.04 clears Isaac Sim 5.1.0 (580.65.06) and 6.0.0 (580.95.05) but **not** 6.0.1 or 6.1.0, which both test at 595.58.03. It sets a ceiling, and 6.0.0 is the newest release under it.
+  - **First answer was wrong and got reversed.** The initial call was stable 5.1.0 / Isaac Lab 2.3.2, on the reasoning that a beta simulator is not worth the risk — citing IsaacLab#6200 as an open dependency conflict. That issue had been **closed on 2026-08-04**, and Isaac Sim 6.1.0 had shipped three days before this was written. Checking the tracker reversed the decision; see README §3.4.
+  - **[IsaacSim#367](https://github.com/isaac-sim/IsaacSim/issues/367) is Spike 4.** `TiledCamera` returns broken tiles under ray tracing; NVIDIA reproduced it and closed it with *"can confirm the issue in 5.1, it is however fixed in 6.0"*. 5.1.0 is terminal (Oct 2025, no patch line), so that never gets fixed there. Spiking on 5.1 and later moving to 6.x would also discard the determinism verdict and N.
+  - Python 3.12, not 3.11: the `isaacsim` 6.0.0.0 wheels declare `requires_python == 3.12.*` where 5.1.0.0 declared `3.11.*`.
+  - ⚠️ **`3.0.0-beta2` vs `3.0.0-beta2-post1`.** The `-post1` tag is `v3.0.0-beta2.patch1`, which moved to Isaac Sim 6.0.1 → driver 595.58.03 → **not runnable on this host**. Four characters apart, pulls cleanly, fails at a layer that never mentions drivers.
+- [x] 🤖 **README checkpoint 1** — §3.1 rewritten around the 6.0.0 stack, new §3.4 recording why a beta beats the stable line here, §8.1 gained the measured survey, §8.3 rewritten, §9/§11/§12 updated. Three upstream issues the plan cited as live hazards (#251, #367, IsaacLab#3239) are all closed; §4.4 and §11 now say *how* each closed, because #251 closed by reassignment to the Isaac Lab layer rather than by a fix.
+- [x] 🤖 **Fix the pod scripts against the vendor layout** *(not in the original plan — reading `docker/.env.base`, `Dockerfile.base` and `docker-compose.yaml` to resolve the versions turned up four defects in code written blind)*
+  - **`/workspace` collision.** The image unpacks Isaac Lab into `/workspace/isaaclab`; both scripts defaulted the volume to `/workspace` and would have shadowed it. The symptom is a missing `isaaclab.sh`, which reads as a broken image. Default is now `/idtb` and `/workspace` is refused outright.
+  - **Missing caches.** `bootstrap.sh` only relocated `$HOME` paths, so it missed `/isaac-sim/kit/cache` — the Kit extension cache, the largest — and `/isaac-sim/kit/data`, which is new in Isaac Lab 3.0.
+  - **Non-root container.** `Dockerfile.base` ends on `USER isaaclab` (uid/gid 1000) and ships no `sudo`, while a provider volume arrives root-owned. `bootstrap.sh` now stops with `chown -R 1000:1000 /idtb` as the instruction instead of failing later inside Kit as a `PermissionError` on `logs/` or an `omni.datastore` lock error.
+  - **`OMNI_KIT_ALLOW_ROOT` is conditional.** 2.3.2 runs as root and needs it; 3.0 does not. It is emitted only when the uid really is root, so the script stays correct across both images.
+  - `tests/test_infra_scripts.py` pins all of it: the vendor cache list, the `/workspace` refusal, both uid regimes, and an end-to-end idempotent bootstrap against a fake home, fake Isaac root and local git origin.
+
+**Remaining — 🧑 Julian, next pod session:**
+
+- [ ] 🧑 **NGC account + API key, then `docker login nvcr.io`.** The survey's `401` means reachable-and-unauthenticated; the pull fails until this is done.
+- [ ] 🧑 **Recreate the pod** on image **`nvcr.io/nvidia/isaac-lab:3.0.0-beta2`** — *not* `-post1`, see above — with:
+  - the network volume mounted at **`/idtb`** — *not* `/workspace`; the mount path is a pod setting, so the volume's contents are unaffected
+  - pod env var `ACCEPT_EULA=Y`
+  - `chown -R 1000:1000 /idtb` from a root shell once, before the Isaac container needs the volume
+- [ ] 🧑 **Re-run `infra/preflight.sh` inside the container.** It now also checks that `isaaclab.sh` survived the mount and that the env vars are set. Paste the output.
+- [ ] 🧑 **Run `infra/bootstrap.sh`**, then stop/restart the pod and confirm caches survived (no re-download). That restart is the only proof the relocation works — a cache that is silently not persisting looks exactly like a slow first run.
 - [ ] 🧑 **Run a shipped Isaac Lab tutorial and look at the PNG** — separates "environment broken" from "my blind code broken". 2 minutes, zero code, saves an ambiguous debugging session later.
+
+  ```
+  source /idtb/env.sh
+  cd $ISAACLAB_PATH
+  ./isaaclab.sh -p scripts/tutorials/00_sim/create_empty.py --headless
+  ```
 
 ---
 

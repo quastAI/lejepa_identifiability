@@ -6,8 +6,10 @@ build-backend = "hatchling.build"
 name = "idtb"
 version = "0.1.0"
 description = "Isaac Sim identifiability testbed: OU-sampled pairs with known Gaussian latents"
-# No requires-python pin: the Python version follows the Isaac Sim release, which
-# is resolved from the pod's driver reading (README §3.2).
+# Isaac Sim 6.0.0 is built against Python 3.12 (README §3.1) -- its wheels declare
+# `requires_python == 3.12.*`. Deliberately a floor and not an equality: the pure
+# tier-0 layers have to stay runnable on whatever local interpreter is to hand.
+requires-python = ">=3.12"
 dependencies = ["torch"]
 
 [project.optional-dependencies]

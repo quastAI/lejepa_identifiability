@@ -60,15 +60,18 @@ The purpose of this section is to keep the plan honest about the difference betw
 | Handles are keyed by **role** (`arm.j0`, `cube.x`), not by Franka joint name | §6.2. A spec keyed on asset-specific names cannot be shared with the mock, which makes the tier-1 contract suite impossible. |
 | Module-level `isaaclab`/`omni`/`carb`/`pxr` imports are banned mechanically | §4.2. Ruff TID253 catches the syntax; `tests/test_import_guard.py` imports every module with those roots blocked, catching the rest. A violation is otherwise only discoverable on the pod. |
 | Isaac is not pip-installable into our environment, by construction | A local install would misrepresent what is actually runnable, and the constraint in §1 is the whole reason the seam exists. |
+| **Isaac Sim 6.0.0** | Resolved from the pod survey (§8.1), and the driver genuinely does decide it — but one layer deeper than expected. 580.178.04 clears 5.1.0 (tested 580.65.06) and 6.0.0 (580.95.05), but **not** 6.0.1 or 6.1.0, which both test at 595.58.03. So 6.0.0 is the newest release this host can run. See §3.4 for why newer beats stable here. |
+| **Isaac Lab 3.0.0-beta2** | The only Isaac Lab release that pairs with Isaac Sim 6.0.0: its `docker/.env.base` pins `ISAACSIM_VERSION=6.0.0`, while `3.0.0-beta2.patch1` moved to 6.0.1 and `develop` to 6.1.0 — both out of reach on this driver. A beta, accepted knowingly (§3.4). |
+| **Container image `nvcr.io/nvidia/isaac-lab:3.0.0-beta2`; no custom Dockerfile** | §8.3. Confirmed present in the NGC registry, so the vendor ships Isaac Sim 6.0.0 and Isaac Lab 3.0.0-beta2 already matched. Note the *sibling* tag `3.0.0-beta2-post1` is `patch1` and therefore Isaac Sim 6.0.1 — **the wrong one for this driver**. The two differ by four characters. |
+| **Python 3.12** | Forced by Isaac Sim 6.x: the `isaacsim` 6.0.0.0 wheels declare `requires_python == 3.12.*` (5.1.0.0 was `3.11.*`). Recorded, not pinned to an equality: `pyproject.toml` sets `requires-python = ">=3.12"` so the pure tier-0 layers keep running on the local interpreter, and nothing selects a Python version independently of the Isaac release. |
+| **GPU: GeForce RTX 4090, 24 GB, compute capability 8.9** | Survey verdict (§8.1). RT cores present; above 6.0.0's minimum spec of RTX 4080 / 16 GB. Ubuntu 22.04.5 is supported; glibc 2.35 clears the floor exactly. |
+| **The network volume mounts at `/idtb`, never at `/workspace`** | The image unpacks Isaac Lab into `/workspace/isaaclab` (`DOCKER_ISAACLAB_PATH`). A volume mounted at `/workspace` shadows it, and the symptom is a missing `isaaclab.sh` — which reads as a broken image, not a mount problem. Both pod scripts refuse `/workspace` outright. |
+| **The container runs as `isaaclab`, uid/gid 1000 — not root** | `Dockerfile.base` does its setup as root and ends on `USER isaaclab`. A provider-supplied volume arrives root-owned, so uid 1000 cannot write it, and the image ships no `sudo`. The ownership fix has to happen from a root shell *before* the Isaac container needs the volume. `ACCEPT_EULA=Y` is required as a pod env var. |
 
 ### 3.2 Deferred — recorded here so that de-pinning does not lose the question
 
 | Open question | What decides it | When |
 |---|---|---|
-| **Isaac Sim release** (5.1 / 6.0 / later) | The NVIDIA driver version actually present on the candidate GPU pool, checked with `nvidia-smi`, against that release's requirements page. Isaac Sim 6.0 is an early developer release; 5.1 is the conservative choice. Decide from evidence, not preference. | Phase 0 |
-| **Isaac Lab release** | Follows from the Isaac Sim release. Isaac Lab 3.x targets Isaac Sim 6.x; Isaac Lab 2.3 pairs with Isaac Sim 5.1. | Phase 0, immediately after the above |
-| **Python version** | Follows the Isaac Sim release (it has changed between releases). Never pin independently. | Phase 0 |
-| **GPU model** | RT-core presence, VRAM headroom for the target scene stage, and actual availability/price at provisioning time. See §8.1 for selection criteria rather than a verdict. | Phase 0 |
 | **Render mode and preset definitions** | Spike 1 (§7.2): which modes can be made deterministic, and at what cost. The preset table in §7.3 is a set of candidates, not a configuration. | Phase 1 |
 | **Whether a physics step is required before rendering** | Spike 2 (§4.5). If a step turns out to be unavoidable, §5.5's "accept interpenetration" recommendation must be revisited. | Phase 1 |
 | **Accumulation depth N** (render calls / `rt_subframes` / SPP to convergence) | Spike 3 (§7.2). This is the per-sample cost multiplier and therefore the entire GPU-hour budget. | Phase 1 |
@@ -81,6 +84,19 @@ The purpose of this section is to keep the plan honest about the difference betw
 - The Stage-1 latent assignment in §5.2 (which four arm joints, which squash radii). Provisional until the Franka asset actually loads and joint limits are read back from it.
 - ρ = 0.95 as the first generation configuration (§9, Phase 6). A starting point for the sweep, not a finding.
 - Cost figures in §8.4. Indicative only and known to move; verify at provisioning time.
+
+### 3.4 Why a beta simulator, when §3.2 said 5.1 was the conservative choice
+
+That earlier judgement was made before reading the issue tracker, and the evidence reversed it.
+
+- **[IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367) is Spike 4.** `TiledCamera` returns broken tiles under ray tracing — correct total resolution, but the per-camera tiles are gone. An NVIDIA engineer reproduced it and closed the issue with *"can confirm the issue in 5.1, it is however fixed in 6.0"*. Path tracing is unaffected. TiledCamera is worth an order of magnitude in throughput, and `standard` — the preset intended for the ~100k-pair dataset — is precisely where ray tracing would be used.
+- **5.1.0 is terminal.** Released 2025-10-21, with no 5.1.x patch line in the eleven months since. That bug will never be fixed there.
+- **6.0 changes the renderer** — RT 2.0 by default, Kit SDK 109.0.2 — and fixes a Replicator path where async rendering re-enabled on timeline pause/stop while annotators were attached, skipping writer frames. Both sit directly on top of §7's determinism question.
+- **Sequencing is the real argument.** The spike's entire value is measuring the renderer we ship on. Spiking against 5.1 and later moving to 6.x discards the determinism verdict and N — which §7.4's closing note already warns do not transfer.
+
+What we are accepting: breaking changes between beta2 and 3.0 stable. The exposure is bounded by how little of Isaac Lab we use — `FRANKA_PANDA_CFG`, batched state writes with read-back, and a camera wrapper — all of it behind the §4.3 `SceneBackend` seam with a contract suite on both sides. That seam was built for the no-local-runtime problem; it absorbs this too.
+
+**Consequence to keep in view:** the driver now pins the 6.x minor. Moving to 6.0.1 or 6.1.0 means a host with ≥ 595.58.03, i.e. a different pod, not a different tag.
 
 ---
 
@@ -251,9 +267,11 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 Both are run by hand before a commit — there is no hosted CI (§10.3).
 
-No version is pinned: the Python version follows the Isaac Sim release (§3.2), and
-the tier-0 layer must not depend on either. Torch installs on macOS; Isaac does
-not, and deliberately cannot — see §1.
+The Isaac runtime is Python 3.12 (§3.1), but that is the pod's constraint, not
+ours: `pyproject.toml` asks only for `>=3.12` so the tier-0 layer keeps running on
+whatever local interpreter is to hand, and nothing selects a Python version
+independently of the Isaac Sim release. Torch installs on macOS; Isaac does not,
+and deliberately cannot — see §1.
 
 ---
 
@@ -417,7 +435,7 @@ def write_latent_state(scene, bound_spec, phi_vals):
 
 > ### ⚠ Silent write failures are the real API risk
 >
-> There is an open report of `write_root_pose_to_sim` leaving objects frozen at the environment origin on Isaac Sim 5.0 despite working on 4.5, with no official resolution ([IsaacSim issue #251](https://github.com/isaac-sim/IsaacSim/issues/251)). A failure of this kind is silent: the dataset generates normally and the cube latents are simply noise. **The read-back assertion in §4.5 is therefore not optional and not a debug aid — it is a correctness gate that runs on every sample during development and on a sampled basis in production runs.**
+> `write_root_pose_to_sim` was reported leaving objects frozen at the environment origin on Isaac Sim 5.0 despite working on 4.5 ([IsaacSim #251](https://github.com/isaac-sim/IsaacSim/issues/251)). That issue is closed, but **not because it was fixed**: NVIDIA judged the behaviour to originate in the Isaac Lab asset layer rather than Isaac Sim core and sent it there. It was reassigned, not resolved — and we are moving to a *different* Isaac Lab major version than it was filed against. A failure of this kind is silent: the dataset generates normally and the cube latents are simply noise. **The read-back assertion in §4.5 is therefore not optional and not a debug aid — it is a correctness gate that runs on every sample during development and on a sampled basis in production runs.**
 >
 > Assets configured with `fix_root_link` or `kinematic_enabled` can also silently ignore root-pose writes. Same gate catches it.
 >
@@ -488,7 +506,7 @@ These four questions gate the render design. None of them can be answered from d
 | **1** | **Determinism.** Same state, two renders → equal? Then A/B/B/A order-independence, per candidate mode. | Decides whether any realtime mode is usable, or whether full `PathTracing` with a fixed SPP cap and the denoiser off is mandatory. |
 | **2** | **Minimal capture sequence.** Does `write → write_data_to_sim → forward → render` yield a correct image with *zero* `sim.step()` calls? | If a physics step is required, §5.5's validity policy must be rethought, because a step means settling. |
 | **3** | **Convergence depth N.** How many `sim.render()` calls (or what `rt_subframes` / `totalSpp`) until the image stops changing. | This is the per-sample cost multiplier and therefore the entire GPU-hour budget. |
-| **4** | **`TiledCamera` × path tracing.** Does tiled rendering work in the mode chosen by Spike 1? | Worth an order of magnitude in throughput. Note the reported behaviour is the *opposite* of the intuitive guess: tiled render products have been reported black in RTX Real-Time while rendering normally under path tracing ([IsaacSim issue #367](https://github.com/isaac-sim/IsaacSim/issues/367)), with single-camera products fine in both. Test, do not assume. |
+| **4** | **`TiledCamera` × the mode chosen by Spike 1.** Does tiled rendering work there? | Worth an order of magnitude in throughput. The known failure is the *opposite* of the intuitive guess: under **ray tracing** the tiles come back wrong — correct total resolution, per-camera tiles gone — while path tracing is fine ([IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)). NVIDIA reproduced it, confirmed it in 5.1 and **fixed it in 6.0**, which is one of the reasons we are on 6.0 (§3.4). Verify the fix rather than trusting it — this spike is now a regression check with a known-good expectation, which makes a FAIL *more* informative, not less. |
 
 Spikes 1 and 2 are the ones that can retroactively invalidate weeks of work. They run first.
 
@@ -517,7 +535,7 @@ A genuinely interesting experiment falls out of having more than one: **does lin
 
 ### 8.1 GPU selection criteria
 
-The GPU model is a deferred decision (§3.2). What is fixed are the criteria:
+The GPU model is now decided (§3.1); the criteria below are what decided it and what any future re-provisioning must satisfy again:
 
 | Criterion | Rule |
 |---|---|
@@ -526,11 +544,28 @@ The GPU model is a deferred decision (§3.2). What is fixed are the criteria:
 | Driver | Must satisfy the requirements page *of the Isaac Sim release being pinned*. This is a matching problem between the release and the provider's pool, not a fixed number — check both at provisioning time. |
 | Availability / price | Real constraints; an ideal part that is never available is not a choice. |
 
-Practically, this narrows to RTX-class parts (GeForce RTX 40/50 series, L40S, RTX A6000, RTX 6000 Ada, RTX PRO 6000 Blackwell). Pick from availability at Phase 0, record the choice here.
+Practically, this narrows to RTX-class parts (GeForce RTX 40/50 series, L40S, RTX A6000, RTX 6000 Ada, RTX PRO 6000 Blackwell).
+
+**Provisioned and surveyed** (`infra/preflight.sh`, all checks passed):
+
+| | Measured | Required by Isaac Sim 6.0.0 |
+|---|---|---|
+| GPU | GeForce RTX 4090, 24 GB, CC 8.9 | RT cores mandatory; minimum spec RTX 4080 / 16 GB |
+| Driver | 580.178.04 | 580.95.05 (Linux x86_64) — **and below 595.58.03, which is what 6.0.1 and 6.1.0 require** |
+| OS | Ubuntu 22.04.5 | Ubuntu 22.04 / 24.04 |
+| glibc | 2.35 | ≥ 2.35 — *exactly at the floor, no margin* |
+| System `python3` | 3.11.10 | 3.12 — moot: the container ships its own interpreter, the host's is unused |
+| Host | 48 vCPU, 251 GiB RAM, root (uid 0) | the *Isaac* container runs as uid 1000 — see §8.3 |
+| Volume | 409 TiB free, fuseblk, writable | — |
+| Egress | Omniverse CDN, PyPI, GitHub all 200; `nvcr.io` 401 | 401 is the expected unauthenticated response — the registry is reachable |
+
+The driver clears 5.1.0 and 6.0.0 but not 6.0.1 or 6.1.0, so it sets the ceiling;
+§3.4 records why we take the newest release under that ceiling rather than the
+older stable one.
 
 ### 8.2 Pre-flight checks (before writing any Isaac-facing code)
 
-1. **Driver version.** Spin up a candidate pod and run `nvidia-smi`. **This reading decides the Isaac Sim release** (§3.2), not the other way round. Getting this backwards is the most common cause of a failed first day.
+1. **Driver version.** Spin up a candidate pod and run `nvidia-smi`. **The reading constrains the Isaac Sim release** (§3.1), not the other way round; getting this backwards is the most common cause of a failed first day. Where the driver clears more than one release — as it did here — say so and record the tiebreak explicitly, rather than letting a preference pass for a measurement.
 2. **RT core presence.** Confirm the allocated GPU is what was advertised.
 3. **NGC account and API key.** Free; required for `docker login nvcr.io`. Set up before it is needed.
 4. **Outbound network.** Isaac Sim streams assets from an Omniverse CDN endpoint on first run. Confirm unrestricted egress.
@@ -538,18 +573,66 @@ Practically, this narrows to RTX-class parts (GeForce RTX 40/50 series, L40S, RT
 
 ### 8.3 Container and volumes
 
-**No custom image.** NVIDIA ships a prebuilt headless `nvcr.io/nvidia/isaac-lab` image on NGC with Isaac Sim and Isaac Lab already installed; building our own would only re-do that work and add a second thing to keep matched to the driver. The tag is resolved in Phase 0 from the driver reading and recorded in §3.1 — nowhere else. Our code is not baked into an image at all: it lives on the network volume and is checked out by `infra/bootstrap.sh`, so a code change is a `git pull`, not a rebuild.
+**No custom image.** NVIDIA ships prebuilt headless Isaac Lab images on NGC with Isaac Sim and Isaac Lab already installed *and already matched to each other*; building our own would only re-do that work and add a second thing to keep matched to the driver. The tag is `nvcr.io/nvidia/isaac-lab:3.0.0-beta2` (§3.1) and appears nowhere else in this repo. Our code is not baked into an image at all: it lives on the network volume and is checked out by `infra/bootstrap.sh`, so a code change is a `git pull`, not a rebuild.
+
+> ### Two tags, four characters apart, different Isaac Sim
+>
+> `3.0.0-beta2` is Isaac Sim **6.0.0**. `3.0.0-beta2-post1` is Isaac Lab's `v3.0.0-beta2.patch1`, which moved to Isaac Sim **6.0.1** — and 6.0.1 tests at driver 595.58.03, which this host does not have (§8.1). The wrong one of these pulls cleanly and then fails at a layer where nothing mentions drivers. Pull by the exact tag.
+
+Everything below was read out of Isaac Lab `v3.0.0-beta2`'s own `docker/.env.base`, `docker/Dockerfile.base` and `docker/docker-compose.yaml`, not inferred. `tests/test_infra_scripts.py` pins the same facts so our scripts and the vendor layout cannot drift apart unnoticed.
+
+> ### The volume must not mount at `/workspace`
+>
+> The image unpacks Isaac Lab into `/workspace/isaaclab` (`DOCKER_ISAACLAB_PATH`). A network volume mounted at `/workspace` — the default on most providers — shadows it, and what you see is a missing `isaaclab.sh`. That reads as a broken image, and the mount is the last thing anyone suspects.
+>
+> Mount the volume at **`/idtb`** instead. The mount path is a pod setting, not a volume setting, so fixing it costs a pod recreate and leaves the volume's contents alone. Both scripts refuse `/workspace` rather than letting it proceed.
+
+> ### The container is *not* root — and this is where a first session gets lost
+>
+> `Dockerfile.base` does its setup as root and then ends on `USER isaaclab`, uid/gid **1000**, with `$HOME=/root` chowned to that user. A provider-supplied network volume arrives owned by `root:root` (the survey in §8.1 confirms ours does), so uid 1000 cannot write to it — and the image ships **no `sudo`**, so the container cannot fix this itself.
+>
+> Take ownership from a root shell *before* the Isaac container needs the volume:
+>
+> ```
+> chown -R 1000:1000 /idtb      # from a root shell on the pod, once per volume
+> ```
+>
+> `infra/bootstrap.sh` attempts the chown and, when it cannot, stops with that instruction rather than continuing and failing later inside Kit. The failure it prevents is indirect — `PermissionError` creating `logs/`, or `omni.datastore` lock errors under `kit/cache` — and reads as an Isaac bug.
+>
+> Note this reverses between image generations: Isaac Lab 2.3.2 runs as root and needs `OMNI_KIT_ALLOW_ROOT=1`, which 3.0's uid-1000 user does not. `bootstrap.sh` sets it only when it is actually running as root, so it stays correct either way.
+
+**Pod environment.**
+
+| Variable | Why | Set where |
+|---|---|---|
+| `ACCEPT_EULA=Y` | The image requires it; without it the container does not come up. | Pod env var, at creation |
+| `OMNI_KIT_ALLOW_ROOT=1` | Only when the uid *is* root — Kit refuses to start as root without it. Not needed on the 3.0 image. | `$IDTB_VOL/env.sh`, written conditionally by `bootstrap.sh` |
 
 Two scripts, both idempotent and both written to run on a pod nobody has logged into yet:
 
-- **`infra/preflight.sh`** — read-only survey: driver version, GPU part, VRAM, OS, egress to NGC / the Omniverse CDN / PyPI, and volume ownership and free space. Every check runs even after one fails, and the verdict block is what gets pasted back. It hard-fails an RT-core-less GPU (A100/H100 and friends) rather than letting a cheap allocation look fine.
-- **`infra/bootstrap.sh`** — takes ownership of the volume, relocates every cache onto it (Kit/asset, GL shader, CUDA compute, Omniverse app data, pip) by symlinking the home paths at the volume, creates the dataset and log directories, and checks out the repo.
+- **`infra/preflight.sh`** — read-only survey: driver version, GPU part, VRAM, OS, egress to NGC / the Omniverse CDN / PyPI, volume ownership and free space, and (when run inside the image) whether `isaaclab.sh` survived the mount, whether the current uid can actually write the volume, and whether the env vars are set. Every check runs even after one fails, and the verdict block is what gets pasted back. It hard-fails an RT-core-less GPU (A100/H100 and friends) rather than letting a cheap allocation look fine.
+- **`infra/bootstrap.sh`** — takes ownership of the volume, relocates every cache onto it by symlink, writes `env.sh`, creates the dataset and log directories, and checks out the repo.
 
 > ### Persistent volume layout — do not skip this
 >
-> Rented pods are ephemeral. Without a network volume, every pod start re-downloads gigabytes of Omniverse assets and recompiles shader caches, costing paid GPU time on every session. Mount a network volume and put the Kit/shader cache, the Omniverse asset cache, the CUDA compute cache, the pip cache, generated datasets and the USD stages on it. `infra/bootstrap.sh` does this by symlinking the home paths at the volume, which works on providers that give you one mount and no control over individual bind mounts.
+> Rented pods are ephemeral. Without a network volume, every pod start re-downloads gigabytes of Omniverse assets and recompiles shader caches, costing paid GPU time on every session. The set of paths worth persisting is not a guess — it is the list the vendor's own `docker-compose.yaml` keeps in named volumes:
 >
-> Note that recent Isaac Sim containers run as a **non-root user by default**. Older tutorials' compose files assume root and will produce permission errors on mounted volumes. `infra/bootstrap.sh` takes ownership first, before touching anything else.
+> | Path | What it holds |
+> |---|---|
+> | `/isaac-sim/kit/cache` | Kit extension cache — the largest, and the one an earlier draft of `bootstrap.sh` missed entirely because it only considered `$HOME` |
+> | `/isaac-sim/kit/data` | Kit runtime data — **new in Isaac Lab 3.0**, absent from the 2.3.2 list |
+> | `~/.cache/ov` | Omniverse asset cache (the CDN downloads) |
+> | `~/.cache/nvidia/GLCache` | compiled GL shaders |
+> | `~/.nv/ComputeCache` | compiled CUDA kernels |
+> | `~/.cache/pip` | Python packages |
+> | `~/.local/share/ov/data` | Omniverse app data |
+> | `~/.nvidia-omniverse/logs` | Kit logs |
+>
+> `bootstrap.sh` relocates each by symlinking its real path at the volume, which works on providers that give you one mount and no control over individual bind mounts. Parent directories are linked where that is a superset. The vendor also persists `/isaac-sim/kit/logs/...` and `~/Documents`; those are outputs rather than caches, so losing them recomputes nothing and they are deliberately left alone.
+>
+> Isaac Lab 3.0 ships `docker/utils/volume_mounts.py`, which parses that compose file for exactly this list. Once the pod is up, prefer diffing our list against its output over trusting either.
+>
+> Verify the relocation actually took by restarting the pod once and confirming Isaac does not re-download assets. A cache that silently is not persisting looks exactly like a slow first run.
 
 ### 8.4 Operating pattern and cost
 
@@ -568,9 +651,9 @@ Treat the GPU as a batch renderer, not a development environment. Per §1 this i
 
 | Phase | Deliverable | Contents | Effort |
 |---|---|---|---|
-| **0** | Pre-flight | NGC account; candidate pod; `nvidia-smi` driver reading; **resolve the Isaac Sim / Isaac Lab / Python versions from that reading and record them in §3**; container pulls and launches headless; one frame rendered to disk. | 0.5–1 day |
+| **0** | Pre-flight | NGC account; candidate pod; `nvidia-smi` driver reading; **resolve the Isaac Sim / Isaac Lab / Python versions from that reading and record them in §3** *(done — §3.1, §8.1)*; container pulls and launches headless; one frame rendered to disk *(outstanding)*. | 0.5–1 day |
 | **0b** | Pure layers *(parallel, local, no GPU)* | OU sampler, `LatentSpec` + squash, package scaffolding, the §4.2 import guard, pod scripts, tier-0 tests green. **Blocked on nothing — done.** | 2 days |
-| **1** | Infrastructure + spikes | Vendor `isaac-lab` image pulled at the resolved tag; network volume with caches relocated onto it; `infra/bootstrap.sh` handling non-root permissions; repeatable pod launch. **Spikes 1–4 (§7.2) answered and recorded in §3.** | 2–3 days |
+| **1** | Infrastructure + spikes | Vendor `isaac-lab` image pulled at the resolved tag; network volume mounted at `/idtb` with caches relocated onto it; `infra/bootstrap.sh` handling the image's uid-1000 user against a root-owned volume; repeatable pod launch. **Spikes 1–4 (§7.2) answered and recorded in §3.** | 2–3 days |
 | **2** | Scene v1 | `stage_v1_tabletop.usd`: table, Franka, cube, PBR materials, HDRI + area lights, camera rig (2–3 views). Debug-preset renders look right. | 1–2 days |
 | **3** | Backend seam + real backend | `SceneBackend` protocol and `MockSceneBackend`, designed against the spike's measurements rather than against documentation; then `IsaacSceneBackend`: handle resolution by name, state writer, read-back assertions confirming every write landed. Collision and visibility diagnostics. Tier-1 contract suite green against Isaac. | 2 days |
 | **4** | Determinism gate | Deterministic capture path; the §7.1 acceptance test passing for every preset intended for dataset use, called by `generate.py` itself and not only by the test suite. | 1–2 days |
@@ -637,16 +720,18 @@ Mechanics:
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Temporal denoiser leaks information between x and x′ | Critical | Determinism acceptance test, run by `generate.py` before every dataset run rather than only in the test suite (§7.1). Aggravated by being the *default* renderer behaviour — must be actively disabled, then measured. |
-| Silent state-write failure (object frozen at env origin, `fix_root_link`, kinematic flags) | Critical | Read-back assertion on every sample in development (§6.3). Known open upstream issue with no fix. |
-| Provisioned a GPU without RT cores | Critical | Hard rule: RT-core GPUs only. Verify in Phase 0 before any other work. |
+| Silent state-write failure (object frozen at env origin, `fix_root_link`, kinematic flags) | Critical | Read-back assertion on every sample in development (§6.3). [IsaacSim #251](https://github.com/isaac-sim/IsaacSim/issues/251) was closed by reassignment to the Isaac Lab layer, not by a fix — and we are on a different Isaac Lab major than it was filed against. |
+| Provisioned a GPU without RT cores | Critical | Hard rule: RT-core GPUs only; `infra/preflight.sh` hard-fails one. **Closed for the current pod** — RTX 4090, CC 8.9 (§8.1). Re-opens on any re-provisioning. |
 | No local runtime → slow, blind iteration on Isaac code | High | `MockSceneBackend` and the tier-0/tier-1 split (§4.3, §10.3); Phase 0b runs in parallel with Phase 0. |
 | Occlusion makes g non-injective; results look like encoder failure | High | Multi-view cameras, high oblique placement, per-sample visibility logging, injectivity proxy check. |
 | Cube rotational symmetry hides a latent dimension | High | Omit yaw in Stage 1; switch to a visually asymmetric object before introducing orientation latents. |
 | Bounded joints break Gaussianity of z | High | Absorbed tanh squash (§5.1). Never clip, never wrap. |
-| Driver / Isaac Sim release mismatch | Medium | Phase 0 driver check *drives* the version choice (§8.2). Record the resolved versions in §3. |
+| Driver / Isaac Sim release mismatch | Medium | Phase 0 driver check *constrains* the version choice (§8.2); resolved in §3.1. Residual: the driver caps us at Isaac Sim 6.0.0 — 6.0.1 and 6.1.0 need ≥ 595.58.03 — and glibc 2.35 sits exactly on the floor. Either upgrade means a new host, not a new tag. |
+| Isaac Lab 3.0 beta introduces breaking changes before 3.0 stable | Medium | Accepted knowingly (§3.4). Exposure is bounded by a deliberately small Isaac Lab surface behind the §4.3 seam, with the tier-1 contract suite defining what a migration has to keep working. Pin the tag; do not track `develop`. |
 | Rendering throughput makes large datasets infeasible | Medium | Spikes 1, 3, 4 before committing to a preset; `standard` for the main dataset, `photoreal` only for a smaller ablation set. |
 | Physics step turns out to be required before rendering | Medium | Spike 2. If confirmed, revisit §5.5 — it changes the validity policy, not just the code. |
-| Ephemeral pods re-download assets every session | Medium | Persistent network volume with cache bind mounts (§8.3). |
+| Ephemeral pods re-download assets every session | Medium | Persistent network volume; `infra/bootstrap.sh` relocates the vendor's own cache list onto it by symlink (§8.3). Only a pod restart proves it took — a cache that is not persisting is indistinguishable from a slow first run. |
+| Network volume mounted at `/workspace` shadows the image's Isaac Lab install | Medium | Mount at `/idtb`; both pod scripts refuse `/workspace` and `tests/test_infra_scripts.py` pins the refusal. The symptom is a missing `isaaclab.sh`, which reads as a broken image rather than a mount problem. |
 | Spot instance preempted mid-generation | Low | Per-shard checkpointing; resume from last completed shard. |
 | Isaac Lab API churn breaks the writer | Low | Pin the resolved version; read-back assertions catch silent write failures immediately. |
 
@@ -658,12 +743,14 @@ Two tracks, and they are independent.
 
 **Track A — resolve the unknowns (needs a GPU):**
 
-1. Create a free NVIDIA NGC account and generate an API key.
-2. Launch a candidate RT-core pod. Run `nvidia-smi`, record the driver version, and **from that reading choose the Isaac Sim release, the matching Isaac Lab release and the Python version. Record all three in §3.**
-3. Pull and launch the container headless. Render a single frame of the default scene to disk and look at it.
-4. Provision the network volume and verify the cache bind mounts survive a pod restart.
-5. Run Spikes 1–4 (§7.2). Record the answers in §3 and rewrite §7.3 with real preset definitions.
-6. Only then start on `stage_v1_tabletop.usd`.
+1. ~~Launch a candidate RT-core pod, run `nvidia-smi`, and resolve the Isaac Sim / Isaac Lab / Python versions from the driver reading.~~ **Done** — surveyed in §8.1, resolved in §3.1: Isaac Sim 6.0.0, Isaac Lab 3.0.0-beta2, Python 3.12, on an RTX 4090 / driver 580.178.04. §3.4 records why the beta and not stable 5.1.
+2. Create a free NVIDIA NGC account and generate an API key, then `docker login nvcr.io`. The survey's `401` from `nvcr.io/v2/` is the registry reachable and unauthenticated — the pull will fail until this is done.
+3. **Recreate the pod with the network volume mounted at `/idtb`, not `/workspace`**, image **`nvcr.io/nvidia/isaac-lab:3.0.0-beta2`** — *not* `3.0.0-beta2-post1`, which is Isaac Sim 6.0.1 and needs a newer driver than this host has — with env `ACCEPT_EULA=Y`. §8.3 explains why the mount path matters; getting it wrong presents as a broken image.
+4. Re-run `infra/preflight.sh` inside the container — it now also checks that `isaaclab.sh` survived the mount and that the env vars are set — then `infra/bootstrap.sh`.
+5. Restart the pod once and confirm Isaac does not re-download assets. This is the only proof the cache relocation works.
+6. Run a shipped Isaac Lab tutorial headless and look at the PNG, before running any of our code, so "environment broken" and "our blind code broken" stay separable.
+7. Run Spikes 1–4 (§7.2). Record the answers in §3 and rewrite §7.3 with real preset definitions.
+8. Only then start on `stage_v1_tabletop.usd`.
 
 **Track B — build what needs no decisions (local, start now):**
 
