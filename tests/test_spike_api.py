@@ -214,6 +214,25 @@ def test_determinism_report_catches_an_aliased_buffer():
     assert not report["deterministic"]
 
 
+def test_aliasing_and_content_reproducibility_are_orthogonal():
+    """Measured on the pod: Isaac's camera output is aliased on every render mode
+    tried, which made `deterministic` permanently False for every preset and hid
+    which ones actually render reproducibly. `AliasedCapture`'s a1/a2/b1/b2 are
+    all independent clones taken immediately after each capture, so its content
+    genuinely *is* reproducible even though the live reference gets corrupted --
+    exactly the case `content_reproducible` exists to separate out.
+    """
+    report = spike.determinism_report(AliasedCapture(), 10, 200, tol=0.0)
+    assert report["content_reproducible"], "a1/a2/b1/b2 are clones; content is fine"
+    assert report["buffers_aliased"]
+    assert not report["deterministic"], "the strict AND still fails a non-cloning caller"
+
+    clean = spike.determinism_report(DeterministicCapture(), 10, 200, tol=0.0)
+    assert clean["content_reproducible"]
+    assert not clean["buffers_aliased"]
+    assert clean["deterministic"]
+
+
 def test_a_threshold_would_hide_the_leak_that_bitwise_catches():
     """Why §7.1 insists acceptance is bitwise rather than a tolerance.
 
@@ -236,6 +255,29 @@ def test_convergence_report_finds_the_smallest_settled_depth():
     assert report["smallest_converged_depth"] == 8
     assert report["changed_across_depths"]
     assert report["curve"][0]["depth"] == 1
+
+
+def test_convergence_report_does_not_trivially_pass_the_deepest_depth():
+    """Comparing the deepest depth's curve row to itself is tautological (mad=0
+    always) and proves nothing about whether that depth has actually converged.
+
+    Measured on the pod: depths 1 through 32 all sat flat at ~48 mad with no
+    improving trend, yet depth 64 read "converged" -- because the old code
+    compared depth 64 to the *same object* it was captured as, not to an
+    independent second render. This fake never settles, even at the deepest
+    depth, and the fix must be able to say so.
+    """
+    calls = {"n": 0}
+
+    def never_settles(depth: int) -> torch.Tensor:
+        calls["n"] += 1
+        return frame(10 + calls["n"])  # a new value on every single call
+
+    report = spike.convergence_report(never_settles, [1, 2, 4, 8], tol=0.0)
+    deepest_row = report["curve"][-1]
+    assert deepest_row["depth"] == 8
+    assert not deepest_row["bitwise_vs_deepest"], "self-comparison masked real non-convergence"
+    assert report["smallest_converged_depth"] is None
 
 
 def test_convergence_report_flags_a_curve_that_never_moved():

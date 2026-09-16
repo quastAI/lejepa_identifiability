@@ -140,6 +140,14 @@ def determinism_report(
     The A/B/B/A order is §7.1's: ``mad(A1, A2)`` is order-independence (A
     rendered first and last) and ``mad(B1, B2)`` is the back-to-back render where
     temporal accumulation leaks if it leaks anywhere.
+
+    ``content_reproducible`` and ``buffers_aliased`` are orthogonal and reported
+    separately for that reason: the former is a property of the render mode
+    (varies by preset), the latter is a property of the sensor API (measured
+    True on every mode tried, an unavoidable "always clone" caller obligation,
+    not a rendering-quality question). ``deterministic`` is the strict AND of
+    both, for a caller that does not clone -- a real pipeline must, so
+    per-preset comparisons should read ``content_reproducible``.
     """
     a1_live = capture(state_a)
     a1 = a1_live.clone()
@@ -156,6 +164,14 @@ def determinism_report(
 
     same_a, same_b = mean_abs_diff(a1, a2), mean_abs_diff(b1, b2)
     distinct = mean_abs_diff(a1, b1)
+    # a1/a2/b1/b2 are all independent clones, so this is trustworthy regardless
+    # of buffer reuse -- it answers "would a caller that clones correctly see
+    # the same content", separately from "does a caller that doesn't clone get
+    # fooled" (buffers_aliased). Measured on the pod: Isaac's camera output is
+    # aliased on *every* render mode tested, which made `deterministic` below
+    # permanently False for every preset -- true and important on its own, but
+    # it was also silently hiding which presets actually render reproducibly.
+    content_reproducible = same_a <= tol and same_b <= tol and distinct > max(tol, 0.0)
     return {
         "order_independent_mad": same_a,
         "order_independent_max": max_abs_diff(a1, a2),
@@ -168,9 +184,9 @@ def determinism_report(
         # perfectly "deterministic" no matter what the renderer is doing.
         "states_distinguishable": distinct > max(tol, 0.0),
         "buffers_aliased": aliased,
-        "deterministic": (
-            same_a <= tol and same_b <= tol and not aliased and distinct > max(tol, 0.0)
-        ),
+        "content_reproducible": content_reproducible,
+        # Strict AND: true determinism for a caller that does *not* clone.
+        "deterministic": content_reproducible and not aliased,
         "tol": tol,
     }
 
@@ -192,16 +208,22 @@ def convergence_report(
         raise ValueError("need at least two depths to see a change")
 
     frames = {d: capture_at_depth(d).clone() for d in depths}
-    deepest = frames[depths[-1]]
+    # A SECOND, independent capture at the deepest depth -- not the dict entry
+    # reused. Comparing the deepest depth's curve row to itself is tautological
+    # (mad=0 always, proving nothing), and it is exactly what made a flat,
+    # non-improving noise floor from depth 1 to 32 look like "converged at 64"
+    # on the real pod run. This way even the deepest row can show it hasn't
+    # actually settled.
+    reference = capture_at_depth(depths[-1]).clone()
 
     curve = []
     previous = None
     for depth in depths:
         entry = {
             "depth": depth,
-            "mad_vs_deepest": mean_abs_diff(frames[depth], deepest),
-            "max_vs_deepest": max_abs_diff(frames[depth], deepest),
-            "bitwise_vs_deepest": bitwise_equal(frames[depth], deepest),
+            "mad_vs_deepest": mean_abs_diff(frames[depth], reference),
+            "max_vs_deepest": max_abs_diff(frames[depth], reference),
+            "bitwise_vs_deepest": bitwise_equal(frames[depth], reference),
         }
         if previous is not None:
             entry["mad_vs_previous"] = mean_abs_diff(frames[depth], frames[previous])
@@ -913,6 +935,13 @@ def main() -> int:
         # -- sensitivity, ranked above determinism ------------------------
         def check_sensitivity() -> dict[str, Any]:
             current = need_rig()
+            # Under the one preset already measured reproducible (render_mode_sweep
+            # below), not whatever the sim booted into. README §7.1: naming a
+            # realtime mode does not buy determinism, it has to be constructed --
+            # testing sensitivity against the noisy boot default was measuring the
+            # wrong thing. §7.3's actual preset choice stays open; this is this
+            # spike's own best evidence so far, applied here rather than assumed.
+            preset_settings = apply_preset("pathtracing_denoiser_off")
             capture = make_capture(current, depth=args.render_depth)
             base = state_of(joint_pos=current.base_joint_pos, cube_local=current.cube_base_local)
             # The floor is what the renderer does when *nothing* changes; an
@@ -936,6 +965,10 @@ def main() -> int:
                 },
                 noise_floor=floor,
             )
+            facts["preset_applied"] = {
+                "name": "pathtracing_denoiser_off",
+                "settings": preset_settings,
+            }
             if not facts["all_responsive"]:
                 blind = [k for k, v in facts["responses"].items() if not v["responsive"]]
                 raise CheckFailed(
@@ -949,6 +982,11 @@ def main() -> int:
         # -- determinism + aliasing (Spike 1) -----------------------------
         def check_determinism() -> dict[str, Any]:
             current = need_rig()
+            # Same preset as check_sensitivity, same reasoning: this is testing
+            # whether determinism is achievable at all, which the boot default
+            # already answered "no" to (README §7.1) -- not whether this specific
+            # setting choice needs revisiting later against scene v1.
+            preset_settings = apply_preset("pathtracing_denoiser_off")
             capture = make_capture(current, depth=args.render_depth)
             facts = determinism_report(
                 capture,
@@ -959,16 +997,28 @@ def main() -> int:
                 ),
                 tol=args.tol,
             )
+            facts["preset_applied"] = {
+                "name": "pathtracing_denoiser_off",
+                "settings": preset_settings,
+            }
+            # Reported as two separate problems, not one blob: content noise is a
+            # preset/settings question (fixable by choosing differently), buffer
+            # aliasing is a structural sensor-API fact confirmed on every mode
+            # tried (fixable only by always cloning in caller code, permanently).
+            problems = []
+            if not facts["content_reproducible"]:
+                problems.append(
+                    f"content not reproducible: order-independence "
+                    f"{facts['order_independent_mad']:.4g}, back-to-back "
+                    f"{facts['back_to_back_mad']:.4g} (tol {args.tol:g})"
+                )
             if facts["buffers_aliased"]:
-                raise CheckFailed(
-                    "sensor returns a view onto a reused buffer -- every equality "
-                    "result above is memory reuse, not determinism"
+                problems.append(
+                    "buffers aliased: sensor returns a view onto a reused buffer -- "
+                    "every caller must .clone() immediately, always, on this Isaac version"
                 )
-            if not facts["deterministic"]:
-                raise CheckFailed(
-                    f"order-independence {facts['order_independent_mad']:.4g}, "
-                    f"back-to-back {facts['back_to_back_mad']:.4g} (tol {args.tol:g})"
-                )
+            if problems:
+                raise CheckFailed("; ".join(problems))
             return facts
 
         report.run("determinism_and_aliasing", check_determinism)
@@ -1013,10 +1063,15 @@ def main() -> int:
                 except Exception as exc:
                     entry["error"] = f"{type(exc).__name__}: {exc}"
                 results[name] = entry
+            # content_reproducible, not the stricter deterministic: buffers_aliased
+            # measured True on every mode tried here (a sensor-API fact, not a
+            # rendering-quality one -- see determinism_report's docstring), which
+            # would otherwise make this list empty regardless of which preset is
+            # actually good.
             deterministic = [
                 name
                 for name, entry in results.items()
-                if entry.get("determinism", {}).get("deterministic")
+                if entry.get("determinism", {}).get("content_reproducible")
             ]
             return {
                 "presets": results,
