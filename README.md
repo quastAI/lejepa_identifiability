@@ -52,8 +52,12 @@ The purpose of this section is to keep the plan honest about the difference betw
 |---|---|
 | Latents are exactly Gaussian; boundedness handled by an absorbed `tanh` squash | §5.1. Preserves Theorem 1's premise and injectivity of *g*. |
 | A single scalar ρ shared across all latent dimensions | §5.4. Required for simultaneous (non-sequential) identifiability, per the paper's Appendix F. |
-| State is written by teleport; no policy rollout, no physics settling by default | §5.5. Keeps *g* deterministic and injective. |
+| State is written by teleport; no policy rollout, no physics settling by default | §5.5. Keeps *g* deterministic and injective. **Confirmed, not just assumed** — Spike 2 (§7.2) measured zero-`sim.step()` read-back to `0.0` rad / `1.8×10⁻⁷` m error, 2026-09-16. |
 | Isaac Lab is used for the asset/state layer; raw `carb` settings for the render layer | §4.4. Isaac Lab gives batched tensorised state writes with read-back; it does not expose path-tracing controls. |
+| **`standard` preset: `PathTracing`, `spp=1`, `totalSpp=64`, denoiser off** | §7.2 Spike 1 + §7.3. The as-booted default (`RealTimePathTracing`) measured non-deterministic (`order_independent_mad ≈ 48`, not bitwise); this exact carb configuration measured bitwise-deterministic on both order-independence and back-to-back checks. `debug` and `photoreal` remain open candidates (§7.3). |
+| **Accumulation depth N is the `totalSpp` carb setting, not a `sim.render()` loop count** | §7.2 Spike 3. Under `standard`'s settings, every depth from 1 to 64 external render calls read back bitwise identical — the renderer's own accumulation completes inside one call once `totalSpp` is set. One render call per capture suffices; re-measure on scene v1 per §7.4's closing note, since N almost certainly changes with scene complexity even though the *mechanism* (it's `totalSpp`, not a loop) will not. |
+| **`TiledCamera` is safe to use** | §7.2 Spike 4. Identical frame statistics to `Camera`, and correctly distinguishes two envs holding different states — no sign of [IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)'s tile corruption on this build. Worth the throughput win with no observed downside. |
+| **Isaac's camera sensor output is an aliased, reused buffer — always `.clone()` immediately** | §7.2 Spike 1 (unplanned finding). `camera.data.output[...]` returns the same underlying tensor across calls, on every render mode tried; a caller that doesn't clone before the next capture silently observes the wrong frame. Permanent constraint on `writer.py`/`generate.py`, not a settings choice. |
 | The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. |
 | Tests accompany every module; the §10.1 correctness gates are executable tests | §10.3. |
 | One installable package `src/idtb/`, never top-level `sim`/`gen`/`eval` | Those names collide with Kit extensions on Isaac's `sys.path`, and `eval` shadows a builtin. §4.6. |
@@ -73,12 +77,10 @@ The purpose of this section is to keep the plan honest about the difference betw
 
 | Open question | What decides it | When |
 |---|---|---|
-| **Render mode and preset definitions** | Spike 1 (§7.2): which modes can be made deterministic, and at what cost. The preset table in §7.3 is a set of candidates, not a configuration. | Phase 1 |
-| **Whether a physics step is required before rendering** | Spike 2 (§4.5). If a step turns out to be unavoidable, §5.5's "accept interpenetration" recommendation must be revisited. | Phase 1 |
-| **Accumulation depth N** (render calls / `rt_subframes` / SPP to convergence) | Spike 3 (§7.2). This is the per-sample cost multiplier and therefore the entire GPU-hour budget. | Phase 1 |
-| **`TiledCamera` vs. `Camera`** | Spike 4 (§7.2). Worth an order of magnitude in throughput. | Phase 1 |
 | **Dataset storage format** (HDF5 / WebDataset / other) | Write behind a small writer interface; decide once the per-sample payload size and the training-side read pattern are known. | Phase 5 |
 | **Image resolution** | Candidates 128×128 and 224×224. Cheap to ablate; treat as an experimental variable rather than a configuration decision. | Phase 8 |
+
+The four Spike questions that used to live in this table (render mode/preset, physics-step requirement, accumulation depth N, `TiledCamera` vs. `Camera`) are all answered — moved to §3.1, §7.2.
 
 ### 3.3 Provisional — chosen to make progress, expected to be revised
 
@@ -314,15 +316,20 @@ Use `tanh` rather than a hard clip: `tanh` is a bijection onto the open interval
 
 ### 5.2 Stage-1 latent specification (n = 7)
 
-**Provisional** (see §3.3) — the joint selection and radii below are placeholders until the Franka asset loads and its limits are read back via `robot.find_joints(...)` and the articulation's joint-limit data. Radii are expressed as fractions of the *measured* half-range, never as absolute numbers baked into code.
+**Arm joint limits (indices 0–3) and gripper aperture (index 4) are now measured**, not placeholders — read back from `robot.data.soft_joint_pos_limits` in `spikes/spike_api.py`'s `scene_builds_and_measures` check, 2026-09-16. **Cube position (indices 5–6) is still provisional** (see §3.3): the spike scene has a ground plane and a cube but no table object, so no table extent was ever measured — that comes with scene v1.
 
-| Index | Semantic factor | Physical handle | Squash φᵢ |
-|---|---|---|---|
-| 0–3 | Arm configuration (4 principal DoF) | Franka `panda_joint1,2,4,6` (by name) | cᵢ + rᵢ·tanh(zᵢ), rᵢ = a fraction of measured half-range |
-| 4 | Gripper aperture | `panda_finger_joint1/2` | mapped into the measured aperture range |
-| 5–6 | Cube position on table | cube root pose x, y | x₀ + r·tanh(z₅), y₀ + r·tanh(z₆), r set from the table extent |
+| Index | Semantic factor | Physical handle | Measured limits (rad or m) | Squash φᵢ |
+|---|---|---|---|---|
+| 0 | Arm configuration | `panda_joint1` | `[-2.8973, 2.8973]` | cᵢ + rᵢ·tanh(zᵢ), rᵢ = a fraction of measured half-range |
+| 1 | Arm configuration | `panda_joint2` | `[-1.7628, 1.7628]` | same |
+| 2 | Arm configuration | `panda_joint4` | `[-3.0718, -0.0698]` — asymmetric about 0, `Handle.from_limits` centers on the midpoint regardless | same |
+| 3 | Arm configuration | `panda_joint6` | `[-0.0175, 3.7525]` — asymmetric too | same |
+| 4 | Gripper aperture | `panda_finger_joint1/2` | `[0.0, 0.04]` each | mapped into the measured aperture range |
+| 5–6 | Cube position on table | cube root pose x, y | **not yet measured — no table in the spike scene** | x₀ + r·tanh(z₅), y₀ + r·tanh(z₆), r set from the table extent, once scene v1 has one |
 
-Cube *z*-height is held fixed at the table surface plus half the cube edge — a deterministic function of the other coordinates, not a free latent. Remaining Franka joints are held at a fixed nominal pose in Stage 1 so that *n* stays small and the arm configuration is uniquely determined by the active joints.
+Cube *z*-height is held fixed at the table surface plus half the cube edge — a deterministic function of the other coordinates, not a free latent. Remaining Franka joints (`panda_joint3`, `panda_joint5`, `panda_joint7`) are held at a fixed nominal pose in Stage 1 so that *n* stays small and the arm configuration is uniquely determined by the active joints. The measured `default_joint_pos` for the four active joints is `[0.0, -0.569, -2.81, 3.037]` — notably *not* centered in the range for joints 2 and 3 above, which is fine: `Handle.from_limits` centers the squash on the limit midpoint, independent of whatever pose the robot happens to default to.
+
+**What fraction of the half-range to actually keep is still open** — the limits above are hard PhysX bounds (`soft_joint_pos_limits`), and choosing `fraction < 1.0` in code (Phase 4) is a separate decision from having the raw numbers.
 
 > ### ⚠ Do not include cube yaw in Stage 1
 >
@@ -359,7 +366,7 @@ Three options, and the first is recommended:
 - **Rejection sampling.** Discard colliding pairs. *This biases the latent distribution away from Gaussian* and therefore partially undermines Theorem 1's premise. Avoid unless the collision rate is tiny.
 - **One settling step.** Write the state, step physics once, then render. This makes *g* depend on the physics solver and introduces a non-injective many-to-one map (different pre-settle states settle to the same post-settle state). Worst option for identifiability; useful only for physically plausible imagery in a figure.
 
-> **Dependency on Spike 2.** This recommendation assumes rendering is possible with no physics step at all (§4.5). If the spike shows a step is unavoidable, this section must be revisited, because "accept interpenetration" and "a step happens anyway" are not compatible.
+> **Spike 2 confirmed this, 2026-09-16 — no revision needed.** `write → write_data_to_sim() → sim.forward()`, zero `sim.step()` calls, read back to `0.0` rad joint error and `1.8×10⁻⁷` m cube error (tolerance `1×10⁻⁴`). This recommendation was written *assuming* rendering needs no physics step; that assumption is now measured, not just plausible. `one_step_drift` (informational) measured what one step *would* move things by, for reference: `0.044` rad joint drift, `1.4×10⁻⁶` m cube drift — confirms a step is a real, non-trivial state change, reinforcing why "accept interpenetration" (not settling) is the right default.
 
 ---
 
@@ -494,7 +501,7 @@ Because the driver speaks only to `SceneBackend`, this entire loop is exercised 
 Required mitigations:
 
 - Fix the render seed per sample (a deterministic function of the sample index), or use enough samples per pixel that residual MC noise is below quantisation.
-- Disable temporal denoising and DLSS ray reconstruction, or force an accumulation reset between every capture. Candidate controls: `antialiasing_mode="Off"`/`"DLAA"`, `enable_dl_denoiser=False`, `/rtx/pathtracing/spp`, `/rtx/pathtracing/totalSpp`. Which combination actually achieves determinism is Spike 1.
+- Disable temporal denoising and DLSS ray reconstruction, or force an accumulation reset between every capture. **Answered by Spike 1 (§7.2, §3.1):** `/rtx/rendermode=PathTracing`, `/rtx/pathtracing/spp=1`, `/rtx/pathtracing/totalSpp=64`, `/rtx/pathtracing/optixDenoiser/enabled=0` — measured bitwise-deterministic. `antialiasing_mode`/`enable_dl_denoiser` were the Isaac Lab-level candidates considered before the raw `carb` recipe above was confirmed to work.
 - Render *x* and *x′* with independent accumulation buffers, never back-to-back within one accumulating sequence.
 
 **Determinism acceptance test (a hard gate; run before generating any dataset):**
@@ -508,28 +515,35 @@ assert mean_abs_diff(B1, B2) < tol   # no temporal leakage
 
 If this fails, nothing else in the project is worth running. The same test runs against `MockSceneBackend`, where it must pass trivially — that is what makes a pass on the Isaac backend meaningful rather than merely reassuring.
 
-### 7.2 Phase-1 spikes
+### 7.2 Phase-1 spikes — ✅ answered, `spikes/spike_api.py` against the real pod
 
-These four questions gate the render design. None of them can be answered from documentation; all require a GPU pod.
+These four questions gated the render design and none of them were answerable from documentation; all four needed the GPU pod, and all four were run to a verdict on 2026-09-16 (four iterations — docs/PLAN.md Phase 3 has the blow-by-blow, including two defects the spike script itself had, found and fixed against the real API rather than assumed away).
 
-| # | Question | Why it matters |
+| # | Question | Answer |
 |---|---|---|
-| **1** | **Determinism.** Same state, two renders → equal? Then A/B/B/A order-independence, per candidate mode. | Decides whether any realtime mode is usable, or whether full `PathTracing` with a fixed SPP cap and the denoiser off is mandatory. |
-| **2** | **Minimal capture sequence.** Does `write → write_data_to_sim → forward → render` yield a correct image with *zero* `sim.step()` calls? | If a physics step is required, §5.5's validity policy must be rethought, because a step means settling. |
-| **3** | **Convergence depth N.** How many `sim.render()` calls (or what `rt_subframes` / `totalSpp`) until the image stops changing. | This is the per-sample cost multiplier and therefore the entire GPU-hour budget. |
-| **4** | **`TiledCamera` × the mode chosen by Spike 1.** Does tiled rendering work there? | Worth an order of magnitude in throughput. The known failure is the *opposite* of the intuitive guess: under **ray tracing** the tiles come back wrong — correct total resolution, per-camera tiles gone — while path tracing is fine ([IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)). NVIDIA reproduced it, confirmed it in 5.1 and **fixed it in 6.0**, which is one of the reasons we are on 6.0 (§3.4). Verify the fix rather than trusting it — this spike is now a regression check with a known-good expectation, which makes a FAIL *more* informative, not less. |
+| **1** | **Determinism.** Same state, two renders → equal? Then A/B/B/A order-independence, per candidate mode. | **`RealTimePathTracing` (the default) is not deterministic** — `order_independent_mad ≈ 48`, not bitwise, and unaffected by rendering more samples (§7.2 Spike 3). **`PathTracing` with `spp=1, totalSpp=64, optixDenoiser=Off` is bitwise deterministic** — `order_independent_bitwise` and `back_to_back_bitwise` both `true`. Full `PathTracing` with the denoiser off was mandatory, exactly as the original question anticipated. |
+| **2** | **Minimal capture sequence.** Does `write → write_data_to_sim → forward → render` yield a correct image with *zero* `sim.step()` calls? | **Yes.** Read-back after `write → write_data_to_sim() → sim.forward()`, zero `sim.step()` calls: joint error `0.0` rad, cube error `1.8×10⁻⁷` m (tolerance `1×10⁻⁴`). §5.5's validity policy was written *assuming* this; it is now measured, not assumed. |
+| **3** | **Convergence depth N.** How many `sim.render()` calls (or what `rt_subframes` / `totalSpp`) until the image stops changing. | **N is not a `sim.render()` call count at all — it's the `totalSpp` carb setting.** Under `PathTracing`/`spp=1`/`totalSpp=64`, every depth from 1 to 64 external `sim.render()` calls reads back bitwise identical: the renderer's own accumulation converges fully inside a single call once `totalSpp` is set. One external render call suffices; the actual cost lever going forward is `totalSpp`, not a loop count. (An earlier reading of this data looked like "converges at depth 64" under the *default* mode — that was a bug in the measurement, comparing the deepest depth to itself; fixed, and the default mode showed **no** improving trend from 1 to 32 renders once measured honestly.) |
+| **4** | **`TiledCamera` × the mode chosen by Spike 1.** Does tiled rendering work there? | **Fixed, confirmed.** `Camera` and `TiledCamera` produced identical frame statistics and both correctly distinguished two envs holding different states (`tiles_distinct_mad ≈ 58.8` for both) — no sign of [IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)'s tile corruption on this build. `TiledCamera` is safe to use for the throughput win. |
 
-Spikes 1 and 2 are the ones that can retroactively invalidate weeks of work. They run first.
+**Two things this spike surfaced that weren't in the original four questions**, both load-bearing for Phase 4:
 
-### 7.3 Render presets — candidates, not a configuration
+- **Isaac's camera sensor output is an aliased, reused buffer — on every mode, unconditionally.** `camera.data.output[...]` returns the same underlying tensor across calls; a later capture silently overwrites an earlier one's data if the caller hasn't already cloned it. This is a permanent fact about the sensor API, not a rendering-quality question, and it means **`writer.py`/`generate.py` must `.clone()` every captured frame immediately**, before triggering the next capture, with no exceptions. `spike_api.py`'s own `determinism_report()` deliberately holds a live reference specifically to keep re-verifying this on every future run.
+- **`FRANKA_PANDA_CFG`'s shipped `usd_path` 404s** — the asset moved to a `Legacy/` subfolder upstream and the code was never updated to match. Patched in `spike_api.py` via a small, tested `correct_franka_usd_path()`; the real pipeline (Phase 4) needs the same patch or an upstream fix, whichever comes first.
 
-Preset *definitions* are deliberately left open until Spike 1 and Spike 3 return. What is fixed is the *shape*: three presets, spanning a realism/cost axis, all of which must pass the §7.1 gate before use.
+Spikes 1 and 2 were the ones that could have retroactively invalidated weeks of work. Both closed clean.
 
-| Preset | Intent | Defined by |
-|---|---|---|
-| `debug` | Fastest thing that renders a recognisable image. Scene authoring, camera placement, smoke tests. Determinism not required. | Whatever is cheapest that works |
-| `standard` | Main dataset generation: good realism at tractable cost, provably deterministic. | Spikes 1 + 3 |
-| `photoreal` | Headline figures and a smaller high-fidelity dataset for the realism ablation. | Spikes 1 + 3, with SPP set for convergence |
+### 7.3 Render presets — `standard` measured; `debug`/`photoreal` still open
+
+Spikes 1 and 3 (§7.2) returned. `standard` is now a real, measured carb configuration rather than a placeholder; `debug` and `photoreal` remain candidates, not yet spiked against.
+
+| Preset | Intent | Setting | Status |
+|---|---|---|---|
+| `debug` | Fastest thing that renders a recognisable image. Scene authoring, camera placement, smoke tests. Determinism not required. | Whatever is cheapest that works — the as-booted default (`RealTimePathTracing`) is fine here precisely *because* this preset doesn't need to pass §7.1 | Candidate, unchanged |
+| **`standard`** | Main dataset generation: provably deterministic at tractable cost. | **`/rtx/rendermode=PathTracing`, `/rtx/pathtracing/spp=1`, `/rtx/pathtracing/totalSpp=64`, `/rtx/pathtracing/optixDenoiser/enabled=0`** | **Measured, §7.2 Spike 1+3.** `order_independent_bitwise`/`back_to_back_bitwise` both `true`; converges inside a single external render call (N is the `totalSpp` setting, not a loop count) |
+| `photoreal` | Headline figures and a smaller high-fidelity dataset for the realism ablation. | Candidate: same recipe as `standard` (`PathTracing`, denoiser off) with a higher `totalSpp` for finer detail — not yet spiked | Open — needs its own convergence + determinism check at the higher SPP, on scene v1 (§7.4's known-limit warning applies: `standard`'s numbers were measured on the spike scene, not scene v1) |
+
+**What was ruled out, measured, not assumed:** the as-booted default (`RealTimePathTracing`) is not deterministic — `order_independent_mad ≈ 48` per 128×128 uint8 frame, unaffected by rendering more samples. Every preset intended for dataset generation must pass §7.1's bitwise gate; only the explicit `PathTracing`+denoiser-off recipe above does, on this Isaac build.
 
 A genuinely interesting experiment falls out of having more than one: **does linear identifiability degrade as rendering realism increases?** Same latents, same ρ, same encoder, three presets. If *R²* drops with realism, that is a real and publishable finding about the gap between the theory's idealisation and realistic observation. Cost is one extra dataset generation run.
 
@@ -809,8 +823,9 @@ Mechanics:
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Temporal denoiser leaks information between x and x′ | Critical | Determinism acceptance test, run by `generate.py` before every dataset run rather than only in the test suite (§7.1). Aggravated by being the *default* renderer behaviour — must be actively disabled, then measured. |
-| Silent state-write failure (object frozen at env origin, `fix_root_link`, kinematic flags) | Critical | Read-back assertion on every sample in development (§6.3). [IsaacSim #251](https://github.com/isaac-sim/IsaacSim/issues/251) was closed by reassignment to the Isaac Lab layer, not by a fix — and we are on a different Isaac Lab major than it was filed against. |
+| Temporal denoiser leaks information between x and x′ | Critical | Determinism acceptance test, run by `generate.py` before every dataset run rather than only in the test suite (§7.1). Aggravated by being the *default* renderer behaviour — must be actively disabled, then measured. **Confirmed live**: the as-booted default measured non-deterministic (§7.2 Spike 1); the `standard` preset (§7.3) measured bitwise-clean. |
+| Silent state-write failure (object frozen at env origin, `fix_root_link`, kinematic flags) | Critical | Read-back assertion on every sample in development (§6.3). [IsaacSim #251](https://github.com/isaac-sim/IsaacSim/issues/251) was closed by reassignment to the Isaac Lab layer, not by a fix — and we are on a different Isaac Lab major than it was filed against. **Closed for now**: §7.2 Spike 2's two widely-spaced envs showed no origin-freeze, zero-step read-back exact to solver tolerance. |
+| Isaac's camera sensor returns an aliased, reused output buffer | High | **New, found by §7.2 Spike 1, not in the original register.** `camera.data.output[...]` is the same underlying tensor across calls on every render mode tried; a caller that doesn't `.clone()` before the next capture silently observes the wrong frame. Mitigation is procedural, not configurable: `writer.py`/`generate.py` must clone immediately, always — `spike_api.py`'s `determinism_report()` re-verifies this on every future spike run by design. |
 | Provisioned a GPU without RT cores | Critical | Hard rule: RT-core GPUs only; `infra/preflight.sh` hard-fails one. **Closed for the current pod** — RTX 4090, CC 8.9 (§8.1). Re-opens on any re-provisioning. |
 | No local runtime → slow, blind iteration on Isaac code | High | `MockSceneBackend` and the tier-0/tier-1 split (§4.3, §10.3); Phase 0b runs in parallel with Phase 0. |
 | Occlusion makes g non-injective; results look like encoder failure | High | Multi-view cameras, high oblique placement, per-sample visibility logging, injectivity proxy check. |
@@ -818,8 +833,8 @@ Mechanics:
 | Bounded joints break Gaussianity of z | High | Absorbed tanh squash (§5.1). Never clip, never wrap. |
 | Driver / Isaac Sim release mismatch | Medium | Resolved to Isaac Sim 6.0.1, on a host below its tested driver, accepted knowingly (§3.4.1) rather than re-provisioned for — two prior attempts to select hosts by driver both failed to land the target branch. Residual: the gap is real (570.195.03 vs. tested 595.58.03) and `preflight.sh` fails on it by default rather than hiding it; the actual check is the §7.2 spike measuring the renderer directly, not the driver number as a proxy for it. |
 | Isaac Lab 3.0 beta introduces breaking changes before 3.0 stable | Medium | Accepted knowingly (§3.4). Exposure is bounded by a deliberately small Isaac Lab surface behind the §4.3 seam, with the tier-1 contract suite defining what a migration has to keep working. Pin the tag; do not track `develop`. |
-| Rendering throughput makes large datasets infeasible | Medium | Spikes 1, 3, 4 before committing to a preset; `standard` for the main dataset, `photoreal` only for a smaller ablation set. |
-| Physics step turns out to be required before rendering | Medium | Spike 2. If confirmed, revisit §5.5 — it changes the validity policy, not just the code. |
+| Rendering throughput makes large datasets infeasible | Medium | Spikes 1, 3, 4 done (§7.2); `standard` measured deterministic and converges in one render call. Measured `~0.44` GPU-hours per 100k pairs at B=2, 128×128, on the spike scene (Franka + cuboid + dome light) — **not scene v1**, and not yet swept across `--num-envs {1,2,8,32}` (§9 Phase 3 note). Re-measure before trusting it for a budget. |
+| Physics step turns out to be required before rendering | Medium | **Closed.** Spike 2 (§7.2) measured zero-`sim.step()` read-back correct to solver tolerance; §5.5's policy stands as written. |
 | Ephemeral pods re-download assets every session | Medium | Persistent network volume; `infra/bootstrap.sh` relocates the vendor's own cache list onto it by symlink (§8.3). Only a pod restart proves it took — a cache that is not persisting is indistinguishable from a slow first run. |
 | Network volume mounted at `/workspace` shadows the image's Isaac Lab install | Medium | Mount at `/idtb`; both pod scripts refuse `/workspace` and `tests/test_infra_scripts.py` pins the refusal. The symptom is a missing `isaaclab.sh`, which reads as a broken image rather than a mount problem. |
 | Spot instance preempted mid-generation | Low | Per-shard checkpointing; resume from last completed shard. |
