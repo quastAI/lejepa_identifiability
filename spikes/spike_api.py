@@ -1137,16 +1137,25 @@ def main() -> int:
                 "device": current.device,
             }
             path = out_dir / "canonical_frame.json"
-            if not path.exists():
+            previous = json.loads(path.read_text()) if path.exists() else None
+            comparable = (
+                {k: previous.get(k) for k in fingerprint if k != "sha256"}
+                if previous is not None
+                else None
+            )
+            settings_match = comparable == {k: v for k, v in fingerprint.items() if k != "sha256"}
+            if previous is None or not settings_match:
+                # A settings change (e.g. a different --render-depth) has to reset
+                # the baseline here, not skip forever: leaving the stale fingerprint
+                # in place means every future run at the *new* settings compares
+                # against the *old* ones and never stops SKIPping.
                 path.write_text(json.dumps(fingerprint, indent=2))
-                raise CheckSkipped(
-                    f"no prior run to compare against; wrote {path} -- run this script "
-                    "a second time to complete the check"
+                reason = (
+                    "no prior run to compare against"
+                    if previous is None
+                    else (f"prior run used different settings ({previous}); baseline reset")
                 )
-            previous = json.loads(path.read_text())
-            comparable = {k: previous.get(k) for k in fingerprint if k != "sha256"}
-            if comparable != {k: v for k, v in fingerprint.items() if k != "sha256"}:
-                raise CheckSkipped(f"prior run used different settings: {previous}")
+                raise CheckSkipped(f"{reason} -- run this script again to complete the check")
             if previous["sha256"] != digest:
                 raise CheckFailed(
                     "same state hashes differently in a second process -- "
