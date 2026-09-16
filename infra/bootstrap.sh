@@ -11,6 +11,24 @@
 # the caches it relocates belong to that image.
 set -euo pipefail
 
+# The image sets HOME=/root while the container runs as uid 1000, so every $HOME
+# cache path below resolves into a directory this user cannot write. Measured on
+# the pod: the relocation dies partway through with Permission denied, leaving
+# some caches moved and some not -- the worst outcome, because the run looks
+# half-done rather than failed. The password database is the truth about where
+# this user's home is; the inherited environment is not.
+#
+# Only consulted when HOME is actually unusable. An inherited HOME that works is
+# also the one Isaac will use at runtime, and relocating a different path than
+# the one Kit reads would persist nothing while appearing to succeed.
+if [[ ! -w "${HOME:-/nonexistent}" ]]; then
+  passwd_home="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6 || true)"
+  if [[ -n "$passwd_home" && "$passwd_home" != "${HOME:-}" ]]; then
+    echo "==> HOME=${HOME:-<unset>} is not writable by $(id -un); using $passwd_home from the password database"
+    export HOME="$passwd_home"
+  fi
+fi
+
 # Not /workspace: the vendor image already owns that path (see the guard below).
 VOL="${IDTB_VOL:-/idtb}"
 REPO="${IDTB_REPO:-https://github.com/quastAI/lejepa_identifiability.git}"
@@ -110,6 +128,9 @@ echo "==> environment at $VOL/env.sh"
   echo "# source this on every pod start"
   echo "export ISAACLAB_PATH=\"\${ISAACLAB_PATH:-/workspace/isaaclab}\""
   echo "export IDTB_VOL=\"$VOL\""
+  # Isaac has to agree with us about HOME, or it reads caches at a path we never
+  # relocated and re-downloads everything while the symlinks sit there unused.
+  echo "export HOME=\"$HOME\""
   if [[ "$(id -u)" == "0" ]]; then
     echo "export OMNI_KIT_ALLOW_ROOT=1  # uid is root; Kit refuses to start without it"
   else
@@ -119,12 +140,32 @@ echo "==> environment at $VOL/env.sh"
 sed 's/^/    /' "$VOL/env.sh"
 
 
+# Docker's embedded DNS proxy (127.0.0.11) is sometimes not forwarding yet just
+# after the container boots: hostname lookups fail while raw IP connectivity is
+# fine, and it clears itself within seconds. Measured on the pod, and a known
+# provider quirk rather than anything about this image. Under set -e a single
+# hit kills the whole bootstrap, after the caches have been relocated -- so this
+# is the one step that retries. It is the same failure preflight.sh reports as
+# curl exit 6; if it is still failing after 5 attempts it is not a race.
+git_retry() {
+  local n=0
+  until "$@"; do
+    n=$((n + 1))
+    if ((n >= 5)); then
+      echo "git failed after 5 attempts -- check DNS: getent hosts github.com" >&2
+      exit 1
+    fi
+    echo "    git failed, retrying in ${IDTB_GIT_RETRY_SLEEP:-5}s ($n/5)..."
+    sleep "${IDTB_GIT_RETRY_SLEEP:-5}"
+  done
+}
+
 echo "==> code at $CHECKOUT"
 if [[ -d "$CHECKOUT/.git" ]]; then
-  git -C "$CHECKOUT" fetch --depth 1 origin "$REF"
+  git_retry git -C "$CHECKOUT" fetch --depth 1 origin "$REF"
   git -C "$CHECKOUT" checkout -q FETCH_HEAD
 else
-  git clone --depth 1 --branch "$REF" "$REPO" "$CHECKOUT"
+  git_retry git clone --depth 1 --branch "$REF" "$REPO" "$CHECKOUT"
 fi
 echo "    $(git -C "$CHECKOUT" log -1 --oneline)"
 

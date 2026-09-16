@@ -4,7 +4,7 @@
 
 ## Context
 
-Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 is built and Phase 2's version question is resolved; what remains of Phase 2 is a pod session, and Phase 3 onwards is open.
+Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 is built and Phase 2's version question is resolved; what remains of Phase 2 is one pod session **on a host selected for its driver** (the last recreate landed on the wrong branch — see Phase 2), and Phase 3 onwards is open.
 
 Every Isaac API signature in README §4.4 came from reading docs, **never from running anything**. So: meet the Isaac API first in one spike script, then design the protocol against verified reality. The README's current order (protocol + mock first, Isaac at Phase 3) would mean designing the central abstraction against guesses.
 
@@ -44,7 +44,7 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 ---
 
-## Phase 2 — Pod setup — 🟡 versions resolved, pod not yet on the vendor image
+## Phase 2 — Pod setup — 🟡 on the vendor image; the host it landed on is wrong
 
 > **No Dockerfile needed.** NVIDIA ships a prebuilt headless `nvcr.io/nvidia/isaac-lab` image on NGC. README §8.3's custom image is unnecessary — pull the vendor image, put our code on the volume.
 
@@ -65,14 +65,28 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
   - **`OMNI_KIT_ALLOW_ROOT` is conditional.** 2.3.2 runs as root and needs it; 3.0 does not. It is emitted only when the uid really is root, so the script stays correct across both images.
   - `tests/test_infra_scripts.py` pins all of it: the vendor cache list, the `/workspace` refusal, both uid regimes, and an end-to-end idempotent bootstrap against a fake home, fake Isaac root and local git origin.
 
+- [x] 🧑 **NGC account + API key, then `docker login nvcr.io`** — done; the image pulled.
+- [x] 🧑 **Recreate the pod** on `nvcr.io/nvidia/isaac-lab:3.0.0-beta2`, volume at `/idtb`, `ACCEPT_EULA=Y`, volume chowned to 1000. All four confirmed by the second survey: `/isaac-sim` present, `/workspace/isaaclab/isaaclab.sh` intact (the mount did not shadow it), EULA set, volume `ubuntu:ubuntu` and writable.
+- [x] 🧑🤖 **Re-run `infra/preflight.sh` on the vendor image** — run on 2026-09-16. It printed *all checks passed*, and it was wrong on two counts. Both are recorded in README §8.1:
+  - **Driver 570.195.03**, where the stack was resolved against 580.178.04. `nvidia-smi` in a container reports the *host* driver, and a recreate is a fresh allocation — so §3.1's release was resolved against a machine we no longer have. 6.0.0 is tested at 580.95.05. **It is not a floor**: from 5.1.0 on NVIDIA only publishes "tested on", and Kit refuses below 535.129, so 6.0.0 would very likely boot here and the difference would surface as unexplainable §7.1 numbers. The fix is host selection — RunPod's **CUDA Version = 13.0** filter — not a different tag.
+  - **No egress**, all four endpoints, where the first survey reached all four. `bootstrap.sh` cannot clone and Isaac cannot stream assets without it.
+- [x] 🤖 **Fix the two defects the survey exposed** *(not in the original plan)*
+  - **The false green.** `curl` writes `000` for `%{http_code}` on a failed transfer *and* exits non-zero, so the `|| echo "000"` fallback appended a second one — `000000`, which compared unequal to `000`, so a total blackout scored green. The exit status decides it now and the code (6 = DNS, 7 = refused, 28 = timeout, 35/60 = TLS) is reported, which is the only thing that says *why*.
+  - **Nothing checked the driver against the resolved release**, because when the script was written the driver was the input to that decision rather than a requirement of it. It now fails below 580.95.05 and warns at 595+ ([IsaacSim #537](https://github.com/isaac-sim/IsaacSim/issues/537) — newer is not safer).
+  - Also: the survey now reads the **image's own Isaac Sim version**, so `beta2` vs `beta2-post1` is confirmed from inside the container instead of trusted; probes Isaac's bundled interpreter (the image ships no `python3` on `PATH`, which the old script reported as a raw shell error inside the value); and gained a non-blocking `WARN` tier.
+  - `tests/test_infra_scripts.py` pins all of it, including the blackout regression, the octal trap in comparing driver fields like `.08`, and that an image shipping no `VERSION` file is reported as absent rather than failed.
+- [x] 🧑🤖 **Two more `bootstrap.sh` defects, found by running it on the pod** — both were invisible from macOS, and both are now in README §8.3 with tests:
+  - **`HOME=/root` while running as uid 1000.** Every `$HOME` cache path was unwritable, so the relocation aborted midway under `set -e` — some caches moved, some not, which reads as half-finished rather than failed. The script now falls back to the password database when `HOME` is not writable, and exports the corrected value into `env.sh` so Isaac does not read caches at a path nothing was relocated to.
+  - **A DNS race on the git checkout.** Docker's embedded resolver is briefly not forwarding after container boot; one lookup failure killed a bootstrap that had already relocated every cache. It retries five times now, then names `getent hosts github.com` as the check.
+  - Deliberately *not* changed: the `chown -R` logic. A non-root user really can take ownership on this volume, which is unusual but verified on the pod — defensive changes there would be guarding against a case that does not occur.
+
 **Remaining — 🧑 Julian, next pod session:**
 
-- [ ] 🧑 **NGC account + API key, then `docker login nvcr.io`.** The survey's `401` means reachable-and-unauthenticated; the pull fails until this is done.
-- [ ] 🧑 **Recreate the pod** on image **`nvcr.io/nvidia/isaac-lab:3.0.0-beta2`** — *not* `-post1`, see above — with:
-  - the network volume mounted at **`/idtb`** — *not* `/workspace`; the mount path is a pod setting, so the volume's contents are unaffected
-  - pod env var `ACCEPT_EULA=Y`
-  - `chown -R 1000:1000 /idtb` from a root shell once, before the Isaac container needs the volume
-- [ ] 🧑 **Re-run `infra/preflight.sh` inside the container.** It now also checks that `isaaclab.sh` survived the mount and that the env vars are set. Paste the output.
+- [ ] 🧑 **Recreate the pod once more, fixing two things at once.** The volume's contents survive a recreate, so this costs only the pod.
+  - **Filter for CUDA Version 13.0** (= driver 580.x; 12.8 is the 570 branch we got, 13.2 is 595 and warned against).
+  - **Correct the tag to `nvcr.io/nvidia/isaac-lab:3.0.0-beta2`.** The current pod is on **`-post1`**, which is Isaac Sim **6.0.1** — tested at driver 595.58.03, so on the current 570 host it is two branches below tested rather than one. This is exactly the four-character trap README §8.3 describes, and it pulled cleanly, as predicted.
+  - Keep the volume at `/idtb` and `ACCEPT_EULA=Y`.
+- [ ] 🧑 **Re-run `infra/preflight.sh` and require a clean verdict this time.** Paste the output. If egress is still dead, its `curl` exit code is the diagnosis and the session stops there — nothing downstream works without it.
 - [ ] 🧑 **Run `infra/bootstrap.sh`**, then stop/restart the pod and confirm caches survived (no re-download). That restart is the only proof the relocation works — a cache that is silently not persisting looks exactly like a slow first run.
 - [ ] 🧑 **Run a shipped Isaac Lab tutorial and look at the PNG** — separates "environment broken" from "my blind code broken". 2 minutes, zero code, saves an ambiguous debugging session later.
 
@@ -81,6 +95,8 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
   cd $ISAACLAB_PATH
   ./isaaclab.sh -p scripts/tutorials/00_sim/create_empty.py --headless
   ```
+
+> **If 580-branch hosts are unobtainable**, do not quietly proceed on 570. README §3.4 records the fallback — Isaac Sim 5.0.0 + Isaac Lab 2.2.0 + Python 3.11 — and why it is a genuine downgrade (older than 5.1.0, so it loses the `TiledCamera` fix the throughput plan rests on). That is a decision to take deliberately, not a default to drift into.
 
 ---
 
@@ -144,7 +160,7 @@ pytest          # tier 0 + mock half green, zero collection errors
 
 **Pod:**
 ```
-./isaaclab.sh -p spikes/spike_api.py --out /workspace/data/spike
+./isaaclab.sh -p spikes/spike_api.py --out /idtb/data/spike
 ./isaaclab.sh -p -m pytest --isaac-mode=require
 ```
 `--isaac-mode=require` matters: without it, a broken container that can't import `isaaclab` silently deselects the whole Isaac tier and reports green.

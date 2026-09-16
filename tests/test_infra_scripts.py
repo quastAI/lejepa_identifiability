@@ -52,6 +52,170 @@ def run(script, env=None, **kw):
     )
 
 
+# --- stubs -------------------------------------------------------------------
+# The survey reports on a machine we do not have, so the interesting paths can
+# only be tested by standing in for the two binaries it reads the pod through.
+# Both are driven by env vars, so one stub covers every case.
+
+CURL_STUB = """#!/usr/bin/env bash
+# curl writes %{http_code} even when the transfer never happened: "000" plus a
+# non-zero exit. That combination is the whole point of these tests.
+printf '%s' "${STUB_HTTP_CODE:-000}"
+exit "${STUB_CURL_RC:-0}"
+"""
+
+NVIDIA_SMI_STUB = """#!/usr/bin/env bash
+q=""
+for a in "$@"; do case "$a" in --query-gpu=*) q="${a#--query-gpu=}" ;; esac; done
+case "$q" in
+  name) echo "${STUB_GPU:-NVIDIA GeForce RTX 4090}" ;;
+  driver_version) echo "${STUB_DRIVER:-580.178.04}" ;;
+  *) echo "0, ${STUB_GPU:-NVIDIA GeForce RTX 4090}, ${STUB_DRIVER:-580.178.04}, 24564 MiB, 8.9" ;;
+esac
+"""
+
+
+@pytest.fixture
+def stub_bin(tmp_path):
+    """A PATH prefix holding fake ``curl`` and ``nvidia-smi``.
+
+    Prepended rather than replacing PATH: the survey legitimately shells out to a
+    dozen other tools, and stubbing those would be testing the stubs.
+    """
+    d = tmp_path / "stub-bin"
+    d.mkdir()
+    for name, body in (("curl", CURL_STUB), ("nvidia-smi", NVIDIA_SMI_STUB)):
+        p = d / name
+        p.write_text(body)
+        p.chmod(0o755)
+    return {"PATH": f"{d}:{os.environ['PATH']}"}
+
+
+def test_preflight_reports_a_blackout_as_a_failure(stub_bin):
+    """The regression that made a real pod report green with zero egress.
+
+    curl prints ``000`` *and* exits non-zero, so an ``|| echo 000`` fallback
+    concatenated a second one; the resulting ``000000`` compared unequal to
+    ``000`` and every endpoint being unreachable passed silently. Exit status,
+    not the printed code, is what decides this.
+    """
+    r = run(PREFLIGHT, {**stub_bin, "STUB_CURL_RC": "6", "STUB_HTTP_CODE": "000"})
+    assert "000000" not in r.stdout, "the concatenation bug is back"
+    assert r.stdout.count("FAIL  no egress to") == 4, "a blackout was not reported per endpoint"
+    assert "curl exit 6" in r.stdout, "the cause (6 = DNS) is not surfaced"
+    assert r.returncode == 1
+
+
+def test_preflight_accepts_a_reachable_registry(stub_bin):
+    """401 from nvcr.io is reachable-and-unauthenticated, not a failure."""
+    r = run(PREFLIGHT, {**stub_bin, "STUB_CURL_RC": "0", "STUB_HTTP_CODE": "401"})
+    assert "no egress" not in r.stdout
+
+
+@pytest.mark.parametrize(
+    ("driver", "clears"),
+    [
+        ("580.178.04", True),  # the host the stack was resolved on
+        ("570.195.03", False),  # a recreated pod landed here -- older branch
+        ("580.95.05", True),  # exactly at the floor
+        ("580.95.04", False),
+        # Leading zeros must not be read as octal: 08 and 09 are invalid octal
+        # and would abort the comparison rather than merely compare wrong.
+        ("580.95.08", True),
+        ("580.09.05", False),
+    ],
+)
+def test_preflight_checks_the_driver_against_the_resolved_release(stub_bin, driver, clears):
+    """A pod recreate can land on an older host driver, silently invalidating §3.1.
+
+    The image tag cannot fix it -- the driver belongs to the machine -- so the
+    survey has to say so rather than leave it to a Kit-level error later.
+    """
+    r = run(PREFLIGHT, {**stub_bin, "STUB_DRIVER": driver, "IDTB_MIN_DRIVER": "580.95.05"})
+    below = f"driver {driver} is below" in r.stdout
+    assert below != clears, r.stdout
+    assert driver in r.stdout, "the measured driver is not reported at all"
+
+
+def test_preflight_warns_about_a_too_new_driver_without_blocking(stub_bin):
+    """Newer is not safer, but it is also not our call to make.
+
+    The 595 branch is what 6.0.1/6.1.0 test against, yet IsaacSim #537 reports it
+    breaking CUDA detection where 580 works. Worth seeing before a session is
+    spent; not worth refusing a pod over, so it must not touch the exit status.
+    """
+    r = run(
+        PREFLIGHT,
+        {**stub_bin, "STUB_DRIVER": "595.79", "STUB_HTTP_CODE": "200", "IDTB_VOL": "/nonexistent"},
+    )
+    assert "WARN" in r.stdout
+    assert "#537" in r.stdout
+    assert "not blocking" in r.stdout
+    assert "driver 595.79 is below" not in r.stdout
+    # The only failure here is the absent volume -- the warning added none.
+    assert "1 problem(s)" in r.stdout
+
+
+@pytest.fixture
+def fake_image(tmp_path):
+    """A stand-in for the vendor image's layout: Isaac root + Isaac Lab checkout."""
+    sim = tmp_path / "isaac-sim"
+    lab = tmp_path / "isaaclab"
+    (sim / "kit" / "python" / "bin").mkdir(parents=True)
+    lab.mkdir()
+    sh = lab / "isaaclab.sh"
+    sh.write_text("#!/usr/bin/env bash\n")
+    sh.chmod(0o755)
+    return {
+        "sim": sim,
+        "env": {
+            "ISAACSIM_ROOT_PATH": str(sim),
+            "ISAACLAB_PATH": str(lab),
+            "ACCEPT_EULA": "Y",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("version", "accepted"),
+    [("6.0.0", True), ("6.0.0-rc.10+release.1234", True), ("6.0.1", False), ("5.1.0", False)],
+)
+def test_preflight_catches_the_wrong_image_tag(stub_bin, fake_image, version, accepted):
+    """``3.0.0-beta2`` and ``3.0.0-beta2-post1`` differ by four characters.
+
+    They are Isaac Sim 6.0.0 and 6.0.1, which have different driver floors, and
+    the wrong one pulls cleanly and fails somewhere that never mentions drivers.
+    The tag is invisible from inside the container, so the version file is the
+    only way to know which one is running.
+    """
+    (fake_image["sim"] / "VERSION").write_text(version + "\n")
+    r = run(PREFLIGHT, {**stub_bin, **fake_image["env"], "IDTB_ISAACSIM_VERSION": "6.0.0"})
+    assert (f"image is Isaac Sim {version}" in r.stdout) != accepted, r.stdout
+    assert version in r.stdout, "the measured Isaac Sim version is not reported"
+
+
+def test_preflight_survives_an_image_that_ships_no_version_file(stub_bin, fake_image):
+    """Everything about the image's layout is written blind; absence is a fact.
+
+    A probe that guessed wrong must report what it could not find, never fail --
+    otherwise the survey blocks on its own assumption.
+    """
+    r = run(PREFLIGHT, {**stub_bin, **fake_image["env"]})
+    assert "isaac sim version" in r.stdout
+    assert "wrong tag" not in r.stdout
+    assert "=== VERDICT" in r.stdout
+
+
+def test_preflight_does_not_let_a_missing_binary_corrupt_a_fact_line():
+    """The vendor image has no ``python3`` on PATH -- it ships its own.
+
+    Unguarded, the shell's own "command not found" lands *inside* the reported
+    value, so the survey line reads as a script error rather than a fact.
+    """
+    body = PREFLIGHT.read_text()
+    assert "command -v python3" in body
+
+
 @pytest.mark.parametrize("script", [BOOTSTRAP, PREFLIGHT], ids=lambda p: p.name)
 def test_syntax_is_valid(script):
     assert subprocess.run(["bash", "-n", str(script)]).returncode == 0
@@ -185,6 +349,102 @@ def test_bootstrap_skips_isaac_paths_outside_the_image(pod):
     assert r.returncode == 0, r.stderr
     assert "skipped" in r.stdout
     assert not absent.exists(), "created a dangling symlink outside the image"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anything -- nothing to detect")
+def test_bootstrap_uses_the_password_database_when_home_is_unwritable(pod, tmp_path):
+    """The image sets ``HOME=/root`` while running as uid 1000.
+
+    Every ``$HOME`` cache path then resolves somewhere this user cannot write,
+    and under ``set -e`` the run dies *partway* — some caches relocated, some
+    not, which looks half-done rather than failed. ``getent`` is stubbed here
+    because the real one would point at the developer's own home directory.
+    """
+    real_home = tmp_path / "real-home"
+    (real_home / ".cache").mkdir(parents=True)
+    unwritable = tmp_path / "fake-root"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+
+    stub = tmp_path / "stub-bin"
+    stub.mkdir()
+    getent = stub / "getent"
+    getent.write_text(f"#!/usr/bin/env bash\necho 'u:x:1000:1000::{real_home}:/bin/bash'\n")
+    getent.chmod(0o755)
+
+    r = run(
+        BOOTSTRAP,
+        {
+            **pod["env"],
+            "HOME": str(unwritable),
+            "PATH": f"{stub}:{os.environ['PATH']}",
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    assert "not writable" in r.stdout, "silently used the broken HOME"
+    assert (real_home / ".cache" / "ov").is_symlink(), "caches did not follow the corrected HOME"
+    assert not (unwritable / ".cache").exists()
+    # Isaac must agree with us about HOME, or it reads caches at a path we never
+    # relocated and re-downloads everything while the symlinks sit unused.
+    assert f'export HOME="{real_home}"' in (pod["vol"] / "env.sh").read_text()
+
+
+def test_bootstrap_keeps_a_working_home(pod):
+    """A usable HOME is also the one Isaac will read; do not second-guess it."""
+    r = run(BOOTSTRAP, pod["env"])
+    assert r.returncode == 0, r.stderr
+    assert "not writable" not in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_bootstrap_retries_the_checkout_through_a_dns_race(pod, tmp_path):
+    """Docker's embedded DNS is briefly not forwarding just after container boot.
+
+    Hostname lookups fail while IP connectivity is fine, and it clears itself
+    within seconds. It is the *last* step of the script, so a single hit throws
+    away a bootstrap that has already relocated every cache.
+    """
+    stub = tmp_path / "stub-bin"
+    stub.mkdir()
+    counter = tmp_path / "attempts"
+    git = stub / "git"
+    git.write_text(
+        "#!/usr/bin/env bash\n"
+        f'n=$(cat "{counter}" 2>/dev/null || echo 0); echo $((n + 1)) > "{counter}"\n'
+        'if (( n < 2 )); then echo "fatal: could not resolve host: github.com" >&2; exit 128; fi\n'
+        f'exec {shutil.which("git")} "$@"\n'
+    )
+    git.chmod(0o755)
+
+    r = run(
+        BOOTSTRAP,
+        {
+            **pod["env"],
+            "PATH": f"{stub}:{os.environ['PATH']}",
+            "IDTB_GIT_RETRY_SLEEP": "0",
+        },
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "retrying" in r.stdout
+    assert (pod["vol"] / "repo" / ".git").is_dir(), "the checkout never happened"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_bootstrap_gives_up_on_a_persistent_dns_failure(pod, tmp_path):
+    """Retrying forever would turn a dead network into a hung pod session."""
+    stub = tmp_path / "stub-bin"
+    stub.mkdir()
+    git = stub / "git"
+    git.write_text("#!/usr/bin/env bash\necho 'could not resolve host' >&2\nexit 128\n")
+    git.chmod(0o755)
+
+    r = run(
+        BOOTSTRAP,
+        {**pod["env"], "PATH": f"{stub}:{os.environ['PATH']}", "IDTB_GIT_RETRY_SLEEP": "0"},
+    )
+    assert r.returncode == 1
+    assert "after 5 attempts" in r.stderr
+    assert "getent hosts github.com" in r.stderr, "no way to tell DNS from a bad URL"
 
 
 def test_bootstrap_handles_both_uid_regimes():

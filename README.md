@@ -60,13 +60,14 @@ The purpose of this section is to keep the plan honest about the difference betw
 | Handles are keyed by **role** (`arm.j0`, `cube.x`), not by Franka joint name | §6.2. A spec keyed on asset-specific names cannot be shared with the mock, which makes the tier-1 contract suite impossible. |
 | Module-level `isaaclab`/`omni`/`carb`/`pxr` imports are banned mechanically | §4.2. Ruff TID253 catches the syntax; `tests/test_import_guard.py` imports every module with those roots blocked, catching the rest. A violation is otherwise only discoverable on the pod. |
 | Isaac is not pip-installable into our environment, by construction | A local install would misrepresent what is actually runnable, and the constraint in §1 is the whole reason the seam exists. |
-| **Isaac Sim 6.0.0** | Resolved from the pod survey (§8.1), and the driver genuinely does decide it — but one layer deeper than expected. 580.178.04 clears 5.1.0 (tested 580.65.06) and 6.0.0 (580.95.05), but **not** 6.0.1 or 6.1.0, which both test at 595.58.03. So 6.0.0 is the newest release this host can run. See §3.4 for why newer beats stable here. |
+| **Isaac Sim 6.0.0** | The newest release under the first surveyed host's driver (580.178.04 clears 5.1.0 at 580.65.06 and 6.0.0 at 580.95.05, but not 6.0.1 or 6.1.0, which both test at 595.58.03) — and, independently, the release that fixes the `TiledCamera` bug the throughput plan rests on (§3.4). **Unchanged by the second survey, but its basis changed:** a pod recreate landed on a 570.195.03 host (§8.1), so the release is no longer *derived from* whichever machine we were given. It now constrains which machine we accept — see the next row. |
+| **The host must be on the 580 driver branch, and is selected for it** | 580.95.05 ≤ driver < 595. *Below:* untested for 6.0.0. Note this is a **tested** version, not a floor — from 5.1.0 on, NVIDIA's requirements page says only "Isaac Sim was tested on these driver versions", and Kit's own refusal sits far lower (it rejects < 535.129). So an older driver **starts**, and whatever it changes shows up only in what it renders — which is the one thing this project measures (§7.1). *Above:* the 595 branch is reported to break CUDA detection where 580 works ([IsaacSim #537](https://github.com/isaac-sim/IsaacSim/issues/537)). On RunPod this is the **CUDA Version = 13.0** filter at deploy time (570.x → 12.8, 580.x → 13.0, 595.x → 13.2). `infra/preflight.sh` fails below the floor and warns above it. |
 | **Isaac Lab 3.0.0-beta2** | The only Isaac Lab release that pairs with Isaac Sim 6.0.0: its `docker/.env.base` pins `ISAACSIM_VERSION=6.0.0`, while `3.0.0-beta2.patch1` moved to 6.0.1 and `develop` to 6.1.0 — both out of reach on this driver. A beta, accepted knowingly (§3.4). |
 | **Container image `nvcr.io/nvidia/isaac-lab:3.0.0-beta2`; no custom Dockerfile** | §8.3. Confirmed present in the NGC registry, so the vendor ships Isaac Sim 6.0.0 and Isaac Lab 3.0.0-beta2 already matched. Note the *sibling* tag `3.0.0-beta2-post1` is `patch1` and therefore Isaac Sim 6.0.1 — **the wrong one for this driver**. The two differ by four characters. |
 | **Python 3.12** | Forced by Isaac Sim 6.x: the `isaacsim` 6.0.0.0 wheels declare `requires_python == 3.12.*` (5.1.0.0 was `3.11.*`). Recorded, not pinned to an equality: `pyproject.toml` sets `requires-python = ">=3.12"` so the pure tier-0 layers keep running on the local interpreter, and nothing selects a Python version independently of the Isaac release. |
-| **GPU: GeForce RTX 4090, 24 GB, compute capability 8.9** | Survey verdict (§8.1). RT cores present; above 6.0.0's minimum spec of RTX 4080 / 16 GB. Ubuntu 22.04.5 is supported; glibc 2.35 clears the floor exactly. |
+| **GPU: GeForce RTX 4090, 24 GB, compute capability 8.9** | Survey verdict (§8.1), and the advertised part was allocated on both surveyed hosts. RT cores present; above 6.0.0's minimum spec of RTX 4080 / 16 GB. The *rest* of the host — OS, glibc, core count, driver — is not a property of this decision and moves with every pod recreate; §8.1 records what each one measured. |
 | **The network volume mounts at `/idtb`, never at `/workspace`** | The image unpacks Isaac Lab into `/workspace/isaaclab` (`DOCKER_ISAACLAB_PATH`). A volume mounted at `/workspace` shadows it, and the symptom is a missing `isaaclab.sh` — which reads as a broken image, not a mount problem. Both pod scripts refuse `/workspace` outright. |
-| **The container runs as `isaaclab`, uid/gid 1000 — not root** | `Dockerfile.base` does its setup as root and ends on `USER isaaclab`. A provider-supplied volume arrives root-owned, so uid 1000 cannot write it, and the image ships no `sudo`. The ownership fix has to happen from a root shell *before* the Isaac container needs the volume. `ACCEPT_EULA=Y` is required as a pod env var. |
+| **The container runs as uid/gid 1000 — not root. Key on the uid, never the name** | `Dockerfile.base` does its setup as root and ends on `USER isaaclab`. A provider-supplied volume arrives root-owned, so uid 1000 cannot write it, and the image ships no `sudo`. The ownership fix has to happen from a root shell *before* the Isaac container needs the volume. `ACCEPT_EULA=Y` is required as a pod env var. The survey measured the account as **`ubuntu`**, not `isaaclab` — same uid, different name, because the 3.0 image's Ubuntu 24.04 base already ships a user at 1000. Both pod scripts use `id -u`, so the discrepancy is inert; a script that had matched on the username would not be. |
 
 ### 3.2 Deferred — recorded here so that de-pinning does not lose the question
 
@@ -96,7 +97,9 @@ That earlier judgement was made before reading the issue tracker, and the eviden
 
 What we are accepting: breaking changes between beta2 and 3.0 stable. The exposure is bounded by how little of Isaac Lab we use — `FRANKA_PANDA_CFG`, batched state writes with read-back, and a camera wrapper — all of it behind the §4.3 `SceneBackend` seam with a contract suite on both sides. That seam was built for the no-local-runtime problem; it absorbs this too.
 
-**Consequence to keep in view:** the driver now pins the 6.x minor. Moving to 6.0.1 or 6.1.0 means a host with ≥ 595.58.03, i.e. a different pod, not a different tag.
+**Consequence to keep in view:** the driver pins the 6.x minor, and the relationship runs both ways. Moving *up* to 6.0.1 or 6.1.0 means a host at ≥ 595.58.03 — a different pod, not a different tag. Staying on 6.0.0 means refusing hosts below 580.95.05, which the second survey (§8.1) shows is a real and silent risk on every recreate.
+
+**The escape hatch, recorded so it is a decision and not a scramble:** if 580-branch hosts turn out to be unobtainable, the fallback is Isaac Sim **5.0.0** + Isaac Lab **2.2.0** (`nvcr.io/nvidia/isaac-lab:2.2.0`, Python **3.11**), whose documented driver is 535.216.01 and which is independently confirmed running on the 570 branch. It is a real downgrade, not a lateral move: it is *older* than 5.1.0, so it loses the `TiledCamera` fix that §3.4's whole argument turns on, and Python 3.11 would move `requires-python`. Take it only with the throughput consequence understood, and re-run the §7.2 spikes on whatever is chosen — the determinism verdict and N do not transfer across a renderer change.
 
 ---
 
@@ -546,38 +549,75 @@ The GPU model is now decided (§3.1); the criteria below are what decided it and
 
 Practically, this narrows to RTX-class parts (GeForce RTX 40/50 series, L40S, RTX A6000, RTX 6000 Ada, RTX PRO 6000 Blackwell).
 
-**Provisioned and surveyed** (`infra/preflight.sh`, all checks passed):
+**Provisioned and surveyed** (`infra/preflight.sh`). Two surveys, because the pod
+was recreated onto the vendor image between them — and **the host underneath is
+not stable across a recreate**, which is the single most important thing this
+section now records:
 
-| | Measured | Required by Isaac Sim 6.0.0 |
-|---|---|---|
-| GPU | GeForce RTX 4090, 24 GB, CC 8.9 | RT cores mandatory; minimum spec RTX 4080 / 16 GB |
-| Driver | 580.178.04 | 580.95.05 (Linux x86_64) — **and below 595.58.03, which is what 6.0.1 and 6.1.0 require** |
-| OS | Ubuntu 22.04.5 | Ubuntu 22.04 / 24.04 |
-| glibc | 2.35 | ≥ 2.35 — *exactly at the floor, no margin* |
-| System `python3` | 3.11.10 | 3.12 — moot: the container ships its own interpreter, the host's is unused |
-| Host | 48 vCPU, 251 GiB RAM, root (uid 0) | the *Isaac* container runs as uid 1000 — see §8.3 |
-| Volume | 409 TiB free, fuseblk, writable | — |
-| Egress | Omniverse CDN, PyPI, GitHub all 200; `nvcr.io` 401 | 401 is the expected unauthenticated response — the registry is reachable |
+| | Survey 1 — bare pod, 2026-09-13 | Survey 2 — vendor image, 2026-09-16 | Wanted |
+|---|---|---|---|
+| GPU | RTX 4090, 24 GB, CC 8.9 | RTX 4090, 24 GB, CC 8.9 | RT cores; ≥ RTX 4080 / 16 GB |
+| **Driver** | **580.178.04** | **570.195.03** ❌ | 580.95.05 ≤ d < 595 (§3.1) |
+| OS | Ubuntu 22.04.5 | Ubuntu 24.04.3 | either is supported |
+| glibc | 2.35 — *exactly at the floor* | 2.39 | ≥ 2.35 |
+| CPU / RAM | 48 vCPU, 251 GiB | 32 vCPU, 124 GiB | not a constraint |
+| Account | root (uid 0) | `ubuntu` (uid 1000) | uid 1000 in the Isaac container |
+| System `python3` | 3.11.10 | **absent** | irrelevant — Isaac ships its own |
+| Volume | 409 TiB free, root-owned | 643 TiB free, `1000:1000`, writable | writable by uid 1000 |
+| Isaac Lab | — | `/workspace/isaaclab/isaaclab.sh` present, `ACCEPT_EULA=Y` | the mount did not shadow it |
+| Egress | CDN / PyPI / GitHub 200, `nvcr.io` 401 | **all four unreachable** ❌ | 401 from `nvcr.io` is reachable-and-unauthenticated |
 
-The driver clears 5.1.0 and 6.0.0 but not 6.0.1 or 6.1.0, so it sets the ceiling;
-§3.4 records why we take the newest release under that ceiling rather than the
-older stable one.
+Survey 2 is two blockers and one lesson, and it reported **"all checks passed"**
+for all three:
+
+- **The driver went backwards, from 580.178.04 to 570.195.03.** Nothing about the
+  image or the volume caused this — `nvidia-smi` inside a container reports the
+  *host's* driver, and a recreate is a fresh allocation. §3.1's release was
+  resolved against a machine we no longer had. The fix is to select for it (CUDA
+  Version = 13.0), not to change the tag. **A driver below the tested version
+  does not announce itself**: Kit only refuses below 535.129, so 6.0.0 would very
+  likely have booted and rendered, and the difference would have surfaced as
+  numbers in §7.1 that nobody could explain.
+- **Egress was gone** — all four endpoints, where survey 1 had reached all four.
+  The re-run reports `curl`'s exit code, which separates the causes that matter
+  (6 = DNS, 7 = refused, 28 = timeout, 35/60 = TLS). Without egress, `bootstrap.sh`
+  cannot check out the repo and Isaac cannot stream Omniverse assets on first run.
+- **The survey said all checks passed anyway**, because `curl` writes `000` for
+  `%{http_code}` on a failed transfer *and* exits non-zero, so the script's
+  `|| echo "000"` appended a second one; `000000` then compared unequal to `000`
+  and a total blackout scored green. Exit status decides it now, and
+  `tests/test_infra_scripts.py` pins the regression. The lesson generalises: a
+  check whose failure path has never been exercised is not a check, which is the
+  same argument §10.1's negative controls make about the determinism gates.
+
+Survey 1's numbers are kept above because they are what §3.1 was resolved
+against, and a decision register that quietly loses its own evidence is worse
+than one that shows the evidence moving.
 
 ### 8.2 Pre-flight checks (before writing any Isaac-facing code)
 
 1. **Driver version.** Spin up a candidate pod and run `nvidia-smi`. **The reading constrains the Isaac Sim release** (§3.1), not the other way round; getting this backwards is the most common cause of a failed first day. Where the driver clears more than one release — as it did here — say so and record the tiebreak explicitly, rather than letting a preference pass for a measurement.
+   **Once the release is resolved, this arrow reverses and stays reversed:** the driver becomes a requirement to *select hosts by* (§3.1), and it must be re-read on **every** pod recreate, because the host changes underneath and the survey in §8.1 shows it changing by a whole driver branch. Re-reading it is not ceremony — a driver below the tested version still boots.
 2. **RT core presence.** Confirm the allocated GPU is what was advertised.
 3. **NGC account and API key.** Free; required for `docker login nvcr.io`. Set up before it is needed.
-4. **Outbound network.** Isaac Sim streams assets from an Omniverse CDN endpoint on first run. Confirm unrestricted egress.
+4. **Outbound network.** Isaac Sim streams assets from an Omniverse CDN endpoint on first run, and `bootstrap.sh` checks the repo out over HTTPS. Confirm unrestricted egress — and read the *exit code*, not the HTTP code, since a failed transfer still prints one (§8.1).
 5. **Headless render smoke test.** Render one frame to disk and inspect it. Do not proceed until an image file exists.
 
 ### 8.3 Container and volumes
 
-**No custom image.** NVIDIA ships prebuilt headless Isaac Lab images on NGC with Isaac Sim and Isaac Lab already installed *and already matched to each other*; building our own would only re-do that work and add a second thing to keep matched to the driver. The tag is `nvcr.io/nvidia/isaac-lab:3.0.0-beta2` (§3.1) and appears nowhere else in this repo. Our code is not baked into an image at all: it lives on the network volume and is checked out by `infra/bootstrap.sh`, so a code change is a `git pull`, not a rebuild.
+**No custom image** — with one mechanical exception, below. NVIDIA ships prebuilt headless Isaac Lab images on NGC with Isaac Sim and Isaac Lab already installed *and already matched to each other*; building our own would only re-do that work and add a second thing to keep matched to the driver.
+
+> ### The one thing a rebuild may still be needed for: `ENTRYPOINT`
+>
+> The image's `ENTRYPOINT` is `runheadless.sh`, and RunPod's "Container Start Command" template field does **not** override an `ENTRYPOINT` — so the pod starts Isaac's streaming app instead of dropping you at a shell. Found on the pod, not in any documentation.
+>
+> The remedy is a two-line image (`FROM nvcr.io/nvidia/isaac-lab:3.0.0-beta2` + `ENTRYPOINT []`) or a provider template that clears it. That is not the "custom image" this section rejects: it rebuilds nothing, matches nothing to the driver, and adds no version to keep in sync — it only removes a default command. Keep it that way; the moment a `pip install` appears in it, §8.3's argument is lost. The tag is `nvcr.io/nvidia/isaac-lab:3.0.0-beta2` (§3.1) and appears nowhere else in this repo. Our code is not baked into an image at all: it lives on the network volume and is checked out by `infra/bootstrap.sh`, so a code change is a `git pull`, not a rebuild.
 
 > ### Two tags, four characters apart, different Isaac Sim
 >
-> `3.0.0-beta2` is Isaac Sim **6.0.0**. `3.0.0-beta2-post1` is Isaac Lab's `v3.0.0-beta2.patch1`, which moved to Isaac Sim **6.0.1** — and 6.0.1 tests at driver 595.58.03, which this host does not have (§8.1). The wrong one of these pulls cleanly and then fails at a layer where nothing mentions drivers. Pull by the exact tag.
+> `3.0.0-beta2` is Isaac Sim **6.0.0**. `3.0.0-beta2-post1` is Isaac Lab's `v3.0.0-beta2.patch1`, which moved to Isaac Sim **6.0.1** — and 6.0.1 tests at driver 595.58.03, which neither surveyed host has (§8.1). The wrong one of these pulls cleanly and then fails at a layer where nothing mentions drivers. Pull by the exact tag.
+>
+> This is not hypothetical: the 2026-09-16 pod came up on **`-post1`**, i.e. Isaac Sim 6.0.1 on a 570.195.03 host — two driver branches below tested, not one. It pulled without complaint. `preflight.sh` now reads `/isaac-sim/VERSION` and fails on the mismatch, because the tag is not visible from inside a running container and memory is not evidence.
 
 Everything below was read out of Isaac Lab `v3.0.0-beta2`'s own `docker/.env.base`, `docker/Dockerfile.base` and `docker/docker-compose.yaml`, not inferred. `tests/test_infra_scripts.py` pins the same facts so our scripts and the vendor layout cannot drift apart unnoticed.
 
@@ -610,8 +650,14 @@ Everything below was read out of Isaac Lab `v3.0.0-beta2`'s own `docker/.env.bas
 
 Two scripts, both idempotent and both written to run on a pod nobody has logged into yet:
 
-- **`infra/preflight.sh`** — read-only survey: driver version, GPU part, VRAM, OS, egress to NGC / the Omniverse CDN / PyPI, volume ownership and free space, and (when run inside the image) whether `isaaclab.sh` survived the mount, whether the current uid can actually write the volume, and whether the env vars are set. Every check runs even after one fails, and the verdict block is what gets pasted back. It hard-fails an RT-core-less GPU (A100/H100 and friends) rather than letting a cheap allocation look fine.
-- **`infra/bootstrap.sh`** — takes ownership of the volume, relocates every cache onto it by symlink, writes `env.sh`, creates the dataset and log directories, and checks out the repo.
+- **`infra/preflight.sh`** — read-only survey: driver version, GPU part, VRAM, OS, egress to NGC / the Omniverse CDN / PyPI, volume ownership and free space, and (when run inside the image) whether `isaaclab.sh` survived the mount, whether the current uid can actually write the volume, and whether the env vars are set. Every check runs even after one fails, and the verdict block is what gets pasted back. It hard-fails an RT-core-less GPU (A100/H100 and friends) rather than letting a cheap allocation look fine, and — since §3.1 is now resolved — also hard-fails a driver below 580.95.05, warns above the 595 boundary, reads the **image's own Isaac Sim version** so the `beta2` / `beta2-post1` tag is confirmed from inside rather than remembered, and decides egress on `curl`'s exit status rather than on the code it prints (§8.1 explains why that distinction cost a survey).
+- **`infra/bootstrap.sh`** — takes ownership of the volume, relocates every cache onto it by symlink, writes `env.sh`, creates the dataset and log directories, and checks out the repo. Two things it has to survive, both measured on the pod rather than anticipated:
+
+> ### `$HOME` lies, and the checkout races DNS
+>
+> **The image exports `HOME=/root` while the container runs as uid 1000**, so every `$HOME/...` cache path resolves somewhere this user cannot write. The relocation then fails *partway* — some caches moved, some not — which presents as a half-finished run rather than an error. `bootstrap.sh` checks whether `HOME` is actually writable and, when it is not, takes the home directory from the password database instead, saying so. It also exports the corrected `HOME` into `env.sh`: if Isaac disagrees with us about where home is, it reads caches at a path nothing was relocated to and re-downloads everything while the symlinks sit unused — the failure mode the whole volume layout exists to prevent.
+>
+> **Docker's embedded DNS (`127.0.0.11`) is sometimes not forwarding yet just after the container boots.** Hostname lookups fail while raw IP connectivity is fine, and it clears itself within seconds — a provider quirk, not an image problem. The git checkout is the last step, so one hit used to discard a bootstrap that had already relocated every cache; it now retries five times. This is the same condition `preflight.sh` reports as `curl` exit 6, and if five attempts fail it is not a race — the script says to check `getent hosts github.com`.
 
 > ### Persistent volume layout — do not skip this
 >
@@ -743,11 +789,11 @@ Two tracks, and they are independent.
 
 **Track A — resolve the unknowns (needs a GPU):**
 
-1. ~~Launch a candidate RT-core pod, run `nvidia-smi`, and resolve the Isaac Sim / Isaac Lab / Python versions from the driver reading.~~ **Done** — surveyed in §8.1, resolved in §3.1: Isaac Sim 6.0.0, Isaac Lab 3.0.0-beta2, Python 3.12, on an RTX 4090 / driver 580.178.04. §3.4 records why the beta and not stable 5.1.
-2. Create a free NVIDIA NGC account and generate an API key, then `docker login nvcr.io`. The survey's `401` from `nvcr.io/v2/` is the registry reachable and unauthenticated — the pull will fail until this is done.
-3. **Recreate the pod with the network volume mounted at `/idtb`, not `/workspace`**, image **`nvcr.io/nvidia/isaac-lab:3.0.0-beta2`** — *not* `3.0.0-beta2-post1`, which is Isaac Sim 6.0.1 and needs a newer driver than this host has — with env `ACCEPT_EULA=Y`. §8.3 explains why the mount path matters; getting it wrong presents as a broken image.
-4. Re-run `infra/preflight.sh` inside the container — it now also checks that `isaaclab.sh` survived the mount and that the env vars are set — then `infra/bootstrap.sh`.
-5. Restart the pod once and confirm Isaac does not re-download assets. This is the only proof the cache relocation works.
+1. ~~Launch a candidate RT-core pod, run `nvidia-smi`, and resolve the Isaac Sim / Isaac Lab / Python versions from the driver reading.~~ **Done** — resolved in §3.1: Isaac Sim 6.0.0, Isaac Lab 3.0.0-beta2, Python 3.12. §3.4 records why the beta and not stable 5.1.
+2. ~~Create a free NVIDIA NGC account and generate an API key, then `docker login nvcr.io`.~~ **Done** — the pod is on the vendor image; §8.1's second survey finds `/isaac-sim` and `/workspace/isaaclab/isaaclab.sh` in place, with the volume at `/idtb`, owned by 1000 and writable.
+3. **Recreate the pod once more, this time filtering for CUDA Version 13.0** (the 580 driver branch). The current host is on 570.195.03, below what Isaac Sim 6.0.0 was tested on (§3.1) — and it would boot anyway, which is the problem. Keep everything else: image **`nvcr.io/nvidia/isaac-lab:3.0.0-beta2`** — *not* `3.0.0-beta2-post1` — volume at **`/idtb`**, env `ACCEPT_EULA=Y`. The volume's contents are unaffected by a recreate.
+4. **Re-run `infra/preflight.sh` and require a clean verdict**, including egress. The current pod reaches none of the four endpoints; the re-run prints `curl`'s exit code, which says whether that is DNS, a refused connection, a timeout or TLS. Without egress, step 5 cannot check out the repo and Isaac cannot fetch Omniverse assets.
+5. Run `infra/bootstrap.sh`, then restart the pod once and confirm Isaac does not re-download assets. This is the only proof the cache relocation works.
 6. Run a shipped Isaac Lab tutorial headless and look at the PNG, before running any of our code, so "environment broken" and "our blind code broken" stay separable.
 7. Run Spikes 1–4 (§7.2). Record the answers in §3 and rewrite §7.3 with real preset definitions.
 8. Only then start on `stage_v1_tabletop.usd`.
