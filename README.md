@@ -249,10 +249,12 @@ lejepa_identifiability/
 │   ├── gen/                         # generate.py — dataset driver, sharded
 │   └── analysis/                    # LeJEPA training · metrics
 ├── spikes/
-│   └── spike_api.py                 # one standalone Isaac contact script
+│   └── spike_api.py                 # one standalone Isaac contact script ✅ built
 ├── tests/
 │   ├── test_ou.py, test_spec.py     # tier 0 — pure                  ✅ built
 │   ├── test_import_guard.py         # tier 0 — §4.2 enforced         ✅ built
+│   ├── test_spike_api.py            # tier 0 — the spike's detectors    ✅ built
+│   │                                # + negative controls that fire
 │   ├── contract/                    # tier 1 — parametrized over backend
 │   └── isaac/                       # tier 2 — pod only
 ├── scenes/                          # stage_v1_tabletop.usd, materials/
@@ -606,7 +608,7 @@ than one that shows the evidence moving.
    **This project has since stopped trying to reverse that arrow (§3.4.1).** Two attempts to *select hosts by* driver both failed to land the intended branch — the provider's allocation decides it, not a filter — so the driver reading is recorded and checked (`preflight.sh` still fails below the current release's tested version, by default) but is no longer something a pod recreate is aimed at fixing. It is re-read on every recreate anyway, because the host changes underneath regardless of intent, and a driver below the tested version still boots without saying so.
 2. **RT core presence.** Confirm the allocated GPU is what was advertised.
 3. **NGC account and API key.** Free; required for `docker login nvcr.io`. Set up before it is needed.
-4. **Outbound network.** Isaac Sim streams assets from an Omniverse CDN endpoint on first run, and `bootstrap.sh` checks the repo out over HTTPS. Confirm unrestricted egress — and read the *exit code*, not the HTTP code, since a failed transfer still prints one (§8.1).
+4. **Outbound network.** Isaac Sim streams assets from an Omniverse CDN endpoint on first run, and getting the repo onto the pod (§8.3) needs it too. Confirm unrestricted egress — and read the *exit code*, not the HTTP code, since a failed transfer still prints one (§8.1).
 5. **Headless render smoke test.** Render one frame to disk and inspect it. Do not proceed until an image file exists.
 
 ### 8.3 Container and volumes
@@ -619,7 +621,35 @@ than one that shows the evidence moving.
 >
 > The remedy is a two-line image (`FROM nvcr.io/nvidia/isaac-lab:3.0.0-beta2-post1` + `ENTRYPOINT []`) or a provider template that clears it. That is not the "custom image" this section rejects: it rebuilds nothing, matches nothing to the driver, and adds no version to keep in sync — it only removes a default command. Keep it that way; the moment a `pip install` appears in it, §8.3's argument is lost.
 
-The tag is `nvcr.io/nvidia/isaac-lab:3.0.0-beta2-post1` (§3.1) and appears nowhere else in this repo. Our code is not baked into an image at all: it lives on the network volume, checked out once by hand, so a code change is a `git pull`, not a rebuild.
+The tag is `nvcr.io/nvidia/isaac-lab:3.0.0-beta2-post1` (§3.1) and appears nowhere else in this repo. Our code is not baked into an image at all: it lives on the network volume at `/idtb/repo`.
+
+> ### Getting the code onto the pod — a tarball, not `git clone`
+>
+> There is no `git` remote checkout on the pod, deliberately: `bootstrap.sh` used to clone the repo as its last step, which was circular (the script ships *inside* the repo, so anything able to run it already has one) and cloned to a second, wrong path (§8.3 above, "$HOME lies"). `/idtb/repo` is a **plain directory tree, extracted from a GitHub tarball** — `git -C /idtb/repo log` will not work, and neither will `git pull`.
+>
+> To pull in new commits, re-run this on the pod (first pod setup and every update after — it's idempotent, `tar` just overwrites matching paths):
+>
+> ```bash
+> curl -L https://codeload.github.com/quastAI/lejepa_identifiability/tar.gz/refs/heads/main \
+>   -o /tmp/repo.tar.gz
+>
+> mkdir -p /idtb/repo
+> tar -xzf /tmp/repo.tar.gz -C /idtb/repo --strip-components=1
+> ```
+>
+> **If `curl` hangs or fails to resolve `codeload.github.com`**, that's the Docker-embedded-DNS-not-forwarding-yet quirk from the "$HOME lies" box above, and it's worth retrying plainly first — it can clear itself within seconds. If it doesn't, get a working IP for `codeload.github.com` (`getent hosts codeload.github.com` from a shell where DNS does work, or an external lookup) and pin the request to it for one call, without touching resolver config:
+>
+> ```bash
+> curl -L --resolve codeload.github.com:443:<the IP you found> \
+>   https://codeload.github.com/quastAI/lejepa_identifiability/tar.gz/refs/heads/main \
+>   -o /tmp/repo.tar.gz
+> ```
+>
+> **Do not hardcode a specific IP as a standing fix.** `codeload.github.com` is load-balanced across many addresses; one that answered today is not guaranteed to answer next session, and a stale pinned IP fails just as silently as the DNS problem it was working around. Look it up fresh each time this is actually needed.
+>
+> **One real gap in this method:** `tar -x` only adds and overwrites — it never deletes. A file removed from the repo in a later commit will keep sitting on the pod indefinitely. Harmless for stray data, silently wrong for something like a deleted test or a renamed module. If that's ever suspected, `rm -rf /idtb/repo` before re-extracting is the clean fix; nothing under `/idtb/repo` is meant to be edited in place on the pod.
+>
+> After re-fetching, re-run `infra/bootstrap.sh` — it's cheap and idempotent, and picks up anything the new commit changed there too.
 
 > ### Two tags, four characters apart, different Isaac Sim — and which one we actually run
 >
@@ -658,16 +688,16 @@ Everything below was read out of Isaac Lab `v3.0.0-beta2`'s own `docker/.env.bas
 
 Two scripts, both idempotent and both written to run on a pod nobody has logged into yet:
 
-- **`infra/preflight.sh`** — read-only survey: driver version, GPU part, VRAM, OS, egress to NGC / the Omniverse CDN / PyPI, volume ownership and free space, and (when run inside the image) whether `isaaclab.sh` survived the mount, whether the current uid can actually write the volume, and whether the env vars are set. Every check runs even after one fails, and the verdict block is what gets pasted back. It hard-fails an RT-core-less GPU (A100/H100 and friends) rather than letting a cheap allocation look fine, and — since §3.1 is now resolved — also hard-fails a driver below 580.95.05, warns above the 595 boundary, reads the **image's own Isaac Sim version** so the `beta2` / `beta2-post1` tag is confirmed from inside rather than remembered, and decides egress on `curl`'s exit status rather than on the code it prints (§8.1 explains why that distinction cost a survey).
+- **`infra/preflight.sh`** — read-only survey: driver version, GPU part, VRAM, OS, egress to NGC / the Omniverse CDN / PyPI, volume ownership and free space, and (when run inside the image) whether `isaaclab.sh` survived the mount, whether the current uid can actually write the volume, and whether the env vars are set. Every check runs even after one fails, and the verdict block is what gets pasted back. It hard-fails an RT-core-less GPU (A100/H100 and friends) rather than letting a cheap allocation look fine, and — since §3.1 is now resolved to Isaac Sim 6.0.1 — also hard-fails a driver below 595.58.03 (overridable, since §3.4.1 accepts running below it knowingly), flags the 595.x branch's own reported CUDA-detection bug ([IsaacSim #537](https://github.com/isaac-sim/IsaacSim/issues/537)) as a non-blocking note, reads the **image's own Isaac Sim version** so the `beta2` / `beta2-post1` tag is confirmed from inside rather than remembered, and decides egress on `curl`'s exit status rather than on the code it prints (§8.1 explains why that distinction cost a survey).
 - **`infra/bootstrap.sh`** — takes ownership of the volume, relocates every cache onto it by symlink, writes `env.sh`, and creates the dataset and log directories. **It touches the network nowhere**, which matters twice over: a pod's DNS is briefly dead right after boot (below), and every cache has already been moved by the time the last step runs, so a network failure there would discard the whole run.
 
 > ### It does not clone the repo, and `$HOME` lies
 >
-> **An earlier version cloned the repo as its last step, which was circular** — the script lives *in* the repo, so anything able to run it already has one. Worse, it cloned to a second path, so the checkout being edited and the checkout Isaac ran were different directories. It now reports the checkout it is running from, and whether that checkout is on the volume: one in the container's own filesystem is gone at the next pod start, taking anything edited on the pod with it. Updating the code is a plain `git pull`, by hand, in the checkout you chose.
+> **An earlier version cloned the repo as its last step, which was circular** — the script lives *in* the repo, so anything able to run it already has one. Worse, it cloned to a second path, so the checkout being edited and the checkout Isaac ran were different directories. It now reports the checkout it is running from, and whether that checkout is on the volume: one in the container's own filesystem is gone at the next pod start, taking anything edited on the pod with it. **Not even `git pull` applies** — `/idtb/repo` is a tarball extraction, not a git checkout (§8.3's "Getting the code onto the pod" box has the actual update command).
 >
 > **The image exports `HOME=/root` while the container runs as uid 1000**, so every `$HOME/...` cache path resolves somewhere this user cannot write. The relocation then fails *partway* — some caches moved, some not — which presents as a half-finished run rather than an error. `bootstrap.sh` checks whether `HOME` is actually writable and, when it is not, takes the home directory from the password database instead, saying so. It also exports the corrected `HOME` into `env.sh`: if Isaac disagrees with us about where home is, it reads caches at a path nothing was relocated to and re-downloads everything while the symlinks sit unused — the failure mode the whole volume layout exists to prevent.
 >
-> **Docker's embedded DNS (`127.0.0.11`) is sometimes not forwarding yet just after the container boots.** Hostname lookups fail while raw IP connectivity is fine, and it clears itself within seconds — a provider quirk, not an image problem. It is the same condition `preflight.sh` reports as `curl` exit 6. Nothing in `bootstrap.sh` depends on it any more; a `git pull` that fails this way is worth simply retrying, and `getent hosts github.com` tells you whether it is still DNS.
+> **Docker's embedded DNS (`127.0.0.11`) is sometimes not forwarding yet just after the container boots.** Hostname lookups fail while raw IP connectivity is fine, and it clears itself within seconds — a provider quirk, not an image problem. It is the same condition `preflight.sh` reports as `curl` exit 6. Nothing in `bootstrap.sh` depends on it any more; the tarball fetch above is what actually hits this, and it is worth simply retrying before reaching for `--resolve`. `getent hosts github.com` (or `codeload.github.com`) tells you whether it is still DNS.
 >
 > **`/isaac-sim/kit` itself can be root-owned, independently of the volume — and unlike the volume, there is no root shell to fix it with.** §8.3's `chown` instruction covers the *volume*; it says nothing about paths inside the image, and on the 2026-09-16 pod `/isaac-sim/kit` was one of them: `rm` failed with `Permission denied` after the relocation had already copied the cache, and the run died there under `set -e`, with `kit-data` and everything after it un-relocated. Replacing a path with a symlink is a write to its *parent directory*, not to the cache files themselves, so this is a distinct failure from anything file permissions inside `kit/cache` would predict — confirmed on the pod: `/isaac-sim/kit/cache` itself is `ubuntu:ubuntu` and writable, only its parent `/isaac-sim/kit` is not. `bootstrap.sh` probes the nearest existing ancestor of each cache path before touching it and collects every one it cannot write instead of stopping at the first, so everything relocatable still gets relocated.
 >
@@ -816,7 +846,7 @@ Two tracks, and they are independent.
 **Track B — build what needs no decisions (local, start now):**
 
 1. ~~OU sampler, `LatentSpec`, squash — with tier-0 tests.~~ **Done.** Plus the package scaffolding, the §4.2 import guard as an executable test, and the two pod scripts Track A needs.
-2. `spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast. Written blind, run by Track A.
+2. ~~`spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast.~~ **Written, unrun.** Its detectors are pure and covered by `tests/test_spike_api.py`, which is mostly negative controls — a stale renderer, an aliased buffer, a temporal leak — so the verdict it eventually returns comes from detectors that have been watched detecting (§10.1). Run by Track A.
 3. Then, against what the spike measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.
 
 > ### Closing note on sequencing

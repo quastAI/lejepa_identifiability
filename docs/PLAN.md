@@ -104,7 +104,12 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 ## Phase 3 — The spike
 
-- [ ] 🤖 **Write `spikes/spike_api.py`** — one standalone file. No protocol, no USD authoring. Isaac Lab's shipped `FRANKA_PANDA_CFG` + a cube + one camera.
+- [x] 🤖 **Write `spikes/spike_api.py`** — one standalone file. No protocol, no USD authoring. Isaac Lab's shipped `FRANKA_PANDA_CFG` + a cube + one camera. **Written; every check in the table below is implemented and unrun.** Four things about how it was built, all consequences of writing it blind:
+  - **The detectors are pure and tested locally.** Everything above the "Isaac layer" banner (`determinism_report`, `convergence_report`, `sensitivity_report`, the `Report` registry, the uint8-safe diffs) imports no Isaac, so `tests/test_spike_api.py` runs it on macOS. That file is mostly **negative controls** — a stale renderer, an aliased buffer, a temporal leak, free-running MC noise — each asserting the matching report *fires*. Phase 4 wants these anyway (§10.1); having them now means the spike's verdict comes from detectors that have been watched detecting.
+  - **A threshold test pins why §7.1 is bitwise:** a one-grey-level leak passes `tol=1.0` and fails `bitwise`, in the same assertion.
+  - **Every Isaac symbol is resolved, not assumed.** `resolve()` tries the known spellings of `FRANKA_PANDA_CFG` and records which answered; the scene builds down a ladder (semantics+tiled+rich → plain rgb) so one unknown kwarg costs a recorded note, not the run; each preset's carb settings are read back, because carb silently creates unknown keys and only equality proves the path exists.
+  - **Arm perturbation is a fraction of the *measured* half-range** (§5.2), not a hardcoded radian value.
+- [ ] 🤖 **Deliberate deviation to confirm on the pod: the `B ∈ {1,2,8,32}` sweep is across runs, not within one.** `num_envs` is fixed when the scene is built and `SimulationApp` is one-shot per process, so the script takes `--num-envs` and records it in `facts.json`; the table is assembled by running it four times. Cheaper than rebuilding a second scene mid-process, and each run stays a clean boot.
 
   Three structural rules:
   1. **Never fail fast.** Every check isolated, all run, PASS/FAIL table + `facts.json` at the end. `SimulationApp` is one-shot per process and boot is slow — an assert-and-die script gives one failure per boot.
