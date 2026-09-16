@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Read-only pod survey. Run this first on a fresh pod and paste the whole output.
 #
-# The versions are resolved now (README §3.1: Isaac Sim 6.0.0 / Isaac Lab
-# 3.0.0-beta2 / Python 3.12), so this script's job has changed: it no longer asks
-# what the driver allows, it checks that *this* host still clears what §3.1
-# already decided. A pod recreate can land on a different host with an older
-# driver, which is exactly how that decision silently stops holding.
+# The versions are resolved now (README §3.1: Isaac Sim 6.0.1 / Isaac Lab
+# 3.0.0-beta2.patch1 / Python 3.12), so this script's job has changed: it no
+# longer asks what the driver allows, it checks that *this* host still clears
+# what §3.1 already decided. A pod recreate can land on a different host with an
+# older driver, which is exactly how that decision silently stops holding.
+#
+# README §3.4.1: this project has stopped re-provisioning to chase the driver --
+# two attempts both landed on the wrong branch anyway. The driver check below
+# still fails by default on the accepted gap (570.195.03 vs. tested 595.58.03),
+# not because another recreate is planned, but so the gap stays visible in every
+# session's output instead of being quietly forgotten. Override IDTB_MIN_DRIVER
+# to run anyway -- that is the normal path now, not an escape hatch.
 #
 # Every check runs even if an earlier one fails -- one boot, one full report.
 # Exit status is 1 if a hard rule is violated (see VERDICT), 0 otherwise.
@@ -17,9 +24,8 @@ VOL="${IDTB_VOL:-/idtb}"
 
 # What §3.1 resolved. Kept overridable: the Decision Register is the record, this
 # file is only a check against it, and re-resolving must not mean editing code.
-MIN_DRIVER="${IDTB_MIN_DRIVER:-580.95.05}"   # Isaac Sim 6.0.0, Linux x86_64
-BAD_DRIVER="${IDTB_BAD_DRIVER:-595}"         # IsaacSim #537: 595.x breaks CUDA detection
-WANT_SIM="${IDTB_ISAACSIM_VERSION:-6.0.0}"   # tag 3.0.0-beta2; -post1 is 6.0.1
+MIN_DRIVER="${IDTB_MIN_DRIVER:-595.58.03}"   # Isaac Sim 6.0.1, Linux x86_64
+WANT_SIM="${IDTB_ISAACSIM_VERSION:-6.0.1}"   # tag 3.0.0-beta2-post1; plain beta2 is 6.0.0
 
 problems=()
 warnings=()
@@ -84,21 +90,22 @@ else
   # from 5.1.0 on, the requirements page says "Isaac Sim was tested on these
   # driver versions" and drops the minimum/recommended split. Kit's own refusal
   # is far lower (it rejects < 535.129), so a below-tested driver usually boots.
-  # This is still a hard failure here, because what this project measures is
-  # pixel-level render determinism (README §7.1) and an untested driver is
-  # exactly the kind of uncontrolled variable that corrupts that measurement
-  # quietly. Override IDTB_MIN_DRIVER to deliberately try anyway.
+  # It still fails here by default: this project measures pixel-level render
+  # determinism (README §7.1), and an untested driver is exactly the kind of
+  # uncontrolled variable that corrupts that measurement quietly. README §3.4.1
+  # records that this project no longer re-provisions to close this gap -- two
+  # attempts both landed on the wrong driver branch anyway -- so overriding
+  # IDTB_MIN_DRIVER to proceed is the normal path here, not a one-off escape.
   driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
            | head -1 | tr -d '[:space:]')
   fact "driver vs README §3.1" "$driver  (Isaac Sim $WANT_SIM tested at $MIN_DRIVER)"
   if [[ -n "$driver" ]] && ver_lt "$driver" "$MIN_DRIVER"; then
-    fail "driver $driver is below $MIN_DRIVER, the driver Isaac Sim $WANT_SIM was tested on (README §3.1). The driver belongs to the host, so no image tag changes it: recreate the pod filtering for CUDA 13.0, which is the 580 branch. Kit itself would probably start on $driver -- that is the trap, not the reassurance"
+    fail "driver $driver is below $MIN_DRIVER, the driver Isaac Sim $WANT_SIM was tested on (README §3.1, accepted knowingly in §3.4.1). Kit itself would probably still start on $driver -- that is the trap, not the reassurance: whatever the driver changes shows up only in what it renders, which is the one thing this project measures. Set IDTB_MIN_DRIVER=$driver to proceed deliberately"
   fi
-  # Newer is not safer: the 595 branch tests fine for 6.0.1/6.1.0 but is reported
-  # to break CUDA detection where 580 works (IsaacSim #537). The target is the
-  # 580 branch specifically -- CUDA 13.0, not 12.8 below it and not 13.2 above.
-  if [[ -n "$driver" ]] && ! ver_lt "$driver" "$BAD_DRIVER"; then
-    warn "driver $driver is on the $BAD_DRIVER branch or newer, which Isaac Sim $WANT_SIM was not tested against and which IsaacSim #537 reports breaking CUDA detection -- if Isaac cannot see the GPU, this is the first suspect"
+  # Not a version-mismatch warning -- $MIN_DRIVER already sits on this branch.
+  # A specific reported bug on it, surfaced regardless of pass/fail above.
+  if [[ "$driver" == 595.* ]]; then
+    warn "driver $driver is on the 595 branch, which IsaacSim #537 reports breaking CUDA detection where 580 works -- if Isaac cannot see the GPU, this is the first suspect, not a driver-version problem"
   fi
 fi
 
@@ -144,15 +151,16 @@ if [[ -d "$SIM_ROOT" ]]; then
 
   # Which image is actually running. The tag is not visible from inside the
   # container, and 3.0.0-beta2 vs 3.0.0-beta2-post1 is Isaac Sim 6.0.0 vs 6.0.1
-  # -- four characters, different driver floor, and the wrong one fails at a
-  # layer that never mentions drivers (README §8.3). Probed, never assumed:
-  # these paths are what the image is believed to ship, and an absent one is
-  # reported as absent rather than treated as a failure.
+  # -- four characters, different tested driver, and confusing the two fails at
+  # a layer that never mentions drivers (README §8.3). We are deliberately on
+  # -post1 (6.0.1, README §3.4.1), not plain beta2. Probed, never assumed: these
+  # paths are what the image is believed to ship, and an absent one is reported
+  # as absent rather than treated as a failure.
   sim_version=""
   [[ -r "$SIM_ROOT/VERSION" ]] && sim_version=$(tr -d '[:space:]' < "$SIM_ROOT/VERSION")
   fact "isaac sim version" "${sim_version:-<no $SIM_ROOT/VERSION -- report what the image does ship>}"
   if [[ -n "$sim_version" && "$sim_version" != "$WANT_SIM"* ]]; then
-    fail "image is Isaac Sim $sim_version, but §3.1 resolved $WANT_SIM -- wrong tag? 3.0.0-beta2 is $WANT_SIM, 3.0.0-beta2-post1 is 6.0.1"
+    fail "image is Isaac Sim $sim_version, but §3.1 resolved $WANT_SIM -- wrong tag? 3.0.0-beta2 is 6.0.0, 3.0.0-beta2-post1 is $WANT_SIM"
   fi
 
   lab_version=""

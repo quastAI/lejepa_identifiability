@@ -102,9 +102,12 @@ link_cache() {
   fi
   # Replacing a path with a symlink is a write to its *parent*, so the image
   # leaving /isaac-sim/kit root-owned blocks this however readable the cache
-  # itself is. Measured on the pod: rm failed with Permission denied after the
-  # copy had already run. Some parents do not exist yet and get created, so the
-  # permission that matters is on the nearest ancestor that does exist.
+  # itself is -- confirmed on the pod: /isaac-sim/kit/cache is ubuntu:ubuntu and
+  # writable, /isaac-sim/kit is not. Root is not reachable to fix it either: `su`
+  # and `sudo` both fail from inside this container (no sudo binary at all), so
+  # this is the accepted state of the image, not a transient error to retry.
+  # Some parents do not exist yet and get created, so the permission that
+  # matters is on the nearest ancestor that does exist.
   local probe="$parent"
   while [[ ! -e "$probe" ]]; do
     probe="${probe%/*}"
@@ -199,24 +202,22 @@ broken" stay separable.
   ./isaaclab.sh -p scripts/tutorials/00_sim/create_empty.py --headless
 EOF
 
-# Last, loudest, and a non-zero exit: everything above succeeded, which is
-# exactly why this needs to be hard to miss. The caches the image owns are the
-# largest ones, and a run that reported success while leaving them in place buys
-# a full re-download on every pod start -- the one thing the volume exists to
-# prevent, and invisible until someone wonders why boots are slow.
+# Last and loud, but not fatal: there is nothing to fix here and re-run for.
+# Root is unreachable from inside the container, and the cache directories
+# themselves are already correctly owned (measured: /isaac-sim/kit/cache is
+# ubuntu:ubuntu) -- Isaac writes into them at runtime exactly as the vendor
+# intended. Only the parent blocks *relocating* them, so what's actually lost is
+# persistence: those writes live in the container's own ephemeral layer instead
+# of on $VOL, and do not survive a pod restart or recreate. Surfaced every run
+# so a slow cold start later has an answer instead of looking like a mystery.
 if [[ -n "$blocked" ]]; then
   blocked_dirs=$(printf '%s' "$blocked" | sort -u)
-  cat >&2 <<MSG
+  cat <<MSG
 
-INCOMPLETE -- $(printf '%s\n' "$blocked_dirs" | wc -l | tr -d ' ') path(s) could not be modified by $(id -un) (uid $(id -u)),
-so the caches under them were left where the image put them.
+NOTE: $(printf '%s\n' "$blocked_dirs" | wc -l | tr -d ' ') path(s) are owned by root inside this image and cannot be relocated
+onto $VOL from here (no root shell reachable in this container). Their caches
+will not survive a pod restart or recreate -- accepted, see README §8.3:
 
-From a root shell on this pod, once:
-
-$(printf '%s\n' "$blocked_dirs" | sed "s|^|    chown -R $(id -u):$(id -g) |")
-
-then re-run this script. Everything else above is already done and will be
-skipped as "already linked".
+$(printf '%s\n' "$blocked_dirs" | sed 's|^|    |')
 MSG
-  exit 1
 fi

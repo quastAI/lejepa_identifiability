@@ -137,12 +137,11 @@ def test_preflight_checks_the_driver_against_the_resolved_release(stub_bin, driv
     assert driver in r.stdout, "the measured driver is not reported at all"
 
 
-def test_preflight_warns_about_a_too_new_driver_without_blocking(stub_bin):
-    """Newer is not safer, but it is also not our call to make.
-
-    The 595 branch is what 6.0.1/6.1.0 test against, yet IsaacSim #537 reports it
-    breaking CUDA detection where 580 works. Worth seeing before a session is
-    spent; not worth refusing a pod over, so it must not touch the exit status.
+def test_preflight_flags_a_known_bug_on_the_595_branch_without_blocking(stub_bin):
+    """595 is the tested branch for 6.0.1 (README §3.1) -- and also where
+    IsaacSim #537 reports CUDA detection breaking, where 580 worked. Both are
+    true at once, so this is a heads-up alongside a clean driver check, not a
+    version-mismatch warning; it must not touch the exit status.
     """
     r = run(
         PREFLIGHT,
@@ -151,9 +150,19 @@ def test_preflight_warns_about_a_too_new_driver_without_blocking(stub_bin):
     assert "WARN" in r.stdout
     assert "#537" in r.stdout
     assert "not blocking" in r.stdout
-    assert "driver 595.79 is below" not in r.stdout
+    assert "driver 595.79 is below" not in r.stdout, "595.79 clears the 595.58.03 floor"
     # The only failure here is the absent volume -- the warning added none.
     assert "1 problem(s)" in r.stdout
+
+
+def test_preflight_default_driver_floor_matches_the_resolved_release(stub_bin):
+    """README §3.1: Isaac Sim 6.0.1, tested at 595.58.03 -- without an override,
+    the script's own baked-in default must match what the Decision Register
+    actually says, or the two silently drift apart.
+    """
+    r = run(PREFLIGHT, {**stub_bin, "STUB_DRIVER": "580.178.04"})
+    assert "driver 580.178.04 is below 595.58.03" in r.stdout
+    assert "Isaac Sim 6.0.1" in r.stdout
 
 
 @pytest.fixture
@@ -178,20 +187,31 @@ def fake_image(tmp_path):
 
 @pytest.mark.parametrize(
     ("version", "accepted"),
-    [("6.0.0", True), ("6.0.0-rc.10+release.1234", True), ("6.0.1", False), ("5.1.0", False)],
+    [("6.0.1", True), ("6.0.1-rc.10+release.1234", True), ("6.0.0", False), ("5.1.0", False)],
 )
 def test_preflight_catches_the_wrong_image_tag(stub_bin, fake_image, version, accepted):
     """``3.0.0-beta2`` and ``3.0.0-beta2-post1`` differ by four characters.
 
-    They are Isaac Sim 6.0.0 and 6.0.1, which have different driver floors, and
+    They are Isaac Sim 6.0.0 and 6.0.1, which have different tested drivers, and
     the wrong one pulls cleanly and fails somewhere that never mentions drivers.
+    We're deliberately on ``-post1`` (6.0.1, README §3.4.1), not plain ``beta2``.
     The tag is invisible from inside the container, so the version file is the
     only way to know which one is running.
     """
     (fake_image["sim"] / "VERSION").write_text(version + "\n")
-    r = run(PREFLIGHT, {**stub_bin, **fake_image["env"], "IDTB_ISAACSIM_VERSION": "6.0.0"})
+    r = run(PREFLIGHT, {**stub_bin, **fake_image["env"], "IDTB_ISAACSIM_VERSION": "6.0.1"})
     assert (f"image is Isaac Sim {version}" in r.stdout) != accepted, r.stdout
     assert version in r.stdout, "the measured Isaac Sim version is not reported"
+
+
+def test_preflight_default_target_matches_the_resolved_release(stub_bin, fake_image):
+    """Without an override, the script's own baked-in target must be 6.0.1 --
+    the README §3.1 decision -- not the 6.0.0 it was reversed from.
+    """
+    (fake_image["sim"] / "VERSION").write_text("6.0.0\n")
+    r = run(PREFLIGHT, {**stub_bin, **fake_image["env"]})
+    assert "image is Isaac Sim 6.0.0" in r.stdout
+    assert "3.0.0-beta2-post1 is 6.0.1" in r.stdout
 
 
 def test_preflight_survives_an_image_that_ships_no_version_file(stub_bin, fake_image):
@@ -332,14 +352,18 @@ def test_bootstrap_end_to_end_and_idempotent(pod):
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anything -- nothing to detect")
 def test_bootstrap_survives_a_root_owned_isaac_tree(pod):
-    """The image leaves ``/isaac-sim/kit`` root-owned while running as uid 1000.
+    """The image leaves ``/isaac-sim/kit`` root-owned while running as uid 1000,
+    and root is not reachable to fix it: measured on the pod, both ``su`` and
+    ``sudo`` fail from inside the container (no sudo binary at all). So this is
+    the image's accepted, permanent state, not a transient error — the run must
+    report it plainly and still finish successfully, every time, rather than
+    fail on something nothing can act on.
 
     Replacing a path with a symlink is a write to its *parent*, so the cache
-    being readable is irrelevant. Measured on the pod: ``rm`` failed with
-    Permission denied *after* the copy, and ``set -e`` took the run down with
-    half the caches relocated — the state that looks half-done rather than
-    failed. Every other cache must still be relocated, and the one that was not
-    must be impossible to miss.
+    itself being writable is irrelevant to the relocation — but it does mean
+    Isaac's own runtime writes into it are unaffected; only cross-restart
+    persistence of that one cache is lost. Every other cache must still be
+    relocated, and the one that was not must still be impossible to miss.
     """
     sim_root = pod["tmp"] / "isaac-sim"
     (sim_root / "kit").chmod(0o555)
@@ -352,10 +376,11 @@ def test_bootstrap_survives_a_root_owned_isaac_tree(pod):
     # Not fatal where it happens: the rest of the list still gets done.
     assert (pod["home"] / ".cache" / "ov").is_symlink()
     assert (pod["vol"] / "data").is_dir()
-    # But the run does not get to report success.
-    assert r.returncode == 1
-    assert "INCOMPLETE" in r.stderr
-    assert f"chown -R {os.getuid()}:{os.getgid()} {sim_root / 'kit'}" in r.stderr
+    # Nothing to retry, so this is a NOTE, not a failure -- the run still exits 0.
+    assert r.returncode == 0
+    assert "NOTE" in r.stdout
+    assert str(sim_root / "kit") in r.stdout
+    assert "chown" not in r.stdout + r.stderr, "points at a fix that's confirmed unreachable"
 
 
 def test_bootstrap_skips_isaac_paths_outside_the_image(pod):

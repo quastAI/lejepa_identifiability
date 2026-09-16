@@ -4,7 +4,7 @@
 
 ## Context
 
-Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 is built and Phase 2's version question is resolved; what remains of Phase 2 is one pod session **on a host selected for its driver** (the last recreate landed on the wrong branch — see Phase 2), and Phase 3 onwards is open.
+Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 is built and Phase 2's version question is resolved — **onto the pod already running, not a re-selected one** (README §3.4.1: two attempts to select a host by driver both failed to land the target branch, so the plan stopped chasing it) — and Phase 3 onwards is open.
 
 Every Isaac API signature in README §4.4 came from reading docs, **never from running anything**. So: meet the Isaac API first in one spike script, then design the protocol against verified reality. The README's current order (protocol + mock first, Isaac at Phase 3) would mean designing the central abstraction against guesses.
 
@@ -44,7 +44,7 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 ---
 
-## Phase 2 — Pod setup — 🟡 on the vendor image; the host it landed on is wrong
+## Phase 2 — Pod setup — 🟡 on the vendor image, on the pod we're keeping; bootstrap not yet clean
 
 > **No Dockerfile needed.** NVIDIA ships a prebuilt headless `nvcr.io/nvidia/isaac-lab` image on NGC. README §8.3's custom image is unnecessary — pull the vendor image, put our code on the volume.
 
@@ -66,7 +66,7 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
   - `tests/test_infra_scripts.py` pins all of it: the vendor cache list, the `/workspace` refusal, both uid regimes, and an end-to-end idempotent bootstrap against a fake home, fake Isaac root and local git origin.
 
 - [x] 🧑 **NGC account + API key, then `docker login nvcr.io`** — done; the image pulled.
-- [x] 🧑 **Recreate the pod** on `nvcr.io/nvidia/isaac-lab:3.0.0-beta2`, volume at `/idtb`, `ACCEPT_EULA=Y`, volume chowned to 1000. All four confirmed by the second survey: `/isaac-sim` present, `/workspace/isaaclab/isaaclab.sh` intact (the mount did not shadow it), EULA set, volume `ubuntu:ubuntu` and writable.
+- [x] 🧑 **Recreate the pod**, volume at `/idtb`, `ACCEPT_EULA=Y`, volume chowned to 1000. All four confirmed by the second survey: `/isaac-sim` present, `/workspace/isaaclab/isaaclab.sh` intact (the mount did not shadow it), EULA set, volume `ubuntu:ubuntu` and writable. *Correction after the fact:* the image that actually came up was `3.0.0-beta2-post1`, not plain `beta2` as intended at the time — unnoticed until the version-check row below. See the reversal bullet further down for why it's being kept rather than replaced.
 - [x] 🧑🤖 **Re-run `infra/preflight.sh` on the vendor image** — run on 2026-09-16. It printed *all checks passed*, and it was wrong on two counts. Both are recorded in README §8.1:
   - **Driver 570.195.03**, where the stack was resolved against 580.178.04. `nvidia-smi` in a container reports the *host* driver, and a recreate is a fresh allocation — so §3.1's release was resolved against a machine we no longer have. 6.0.0 is tested at 580.95.05. **It is not a floor**: from 5.1.0 on NVIDIA only publishes "tested on", and Kit refuses below 535.129, so 6.0.0 would very likely boot here and the difference would surface as unexplainable §7.1 numbers. The fix is host selection — RunPod's **CUDA Version = 13.0** filter — not a different tag.
   - **No egress**, all four endpoints, where the first survey reached all four. `bootstrap.sh` cannot clone and Isaac cannot stream assets without it.
@@ -80,15 +80,14 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
   - **It cloned the repo, which was circular** — the script ships inside the repo, so anything that can run it already has one, and the clone landed at a *second* path (`$VOL/repo`), so the checkout being edited was not the checkout Isaac ran. Removed: it reports the checkout it runs from, warns when that is not on the volume (gone at the next pod start), and touches the network nowhere. That also disposes of the DNS race — Docker's embedded resolver is briefly not forwarding after container boot, and one lookup failure used to kill a bootstrap that had already relocated every cache.
   - **`/isaac-sim/kit` is root-owned, and the §8.3 `chown` instruction never covered it** — that instruction is about the *volume*. Measured live: `rm: cannot remove '/isaac-sim/kit/cache': Permission denied`, and the script died there under `set -e` with `kit-data` and every `$HOME` cache after it left un-relocated. A symlink replaces a *parent directory* entry, so this bites regardless of permissions on the cache contents themselves. Fixed by probing the nearest existing ancestor of each target before touching it and collecting every path that fails instead of stopping at the first — everything relocatable still gets relocated — then exiting non-zero at the very end with the exact `chown -R <uid>:<gid> <path>` needed, because a run that quietly skipped the single largest cache and reported "done" would be worse than the crash.
   - Deliberately *not* changed: the `chown -R` logic on the volume itself. A non-root user really can take ownership there, which is unusual but verified on the pod — defensive changes would be guarding against a case that does not occur.
+- [x] 🧑🤖 **Version decision reversed: staying on 6.0.1 (`-post1`), not recreating for 6.0.0.** Two recreates aimed at a 580-branch host for plain `beta2` both landed on 570-branch hosts instead — the provider's allocation decides the driver, not a CUDA-version filter chosen after the fact. The pod already runs `beta2-post1` (Isaac Sim 6.0.1), pulled before the tag mismatch was noticed, and `bootstrap.sh` has run against it. Re-pulling `beta2` now would trade a working image for an unverified one to chase a driver branch two attempts already failed to control, over a one-patch-release difference (6.0.0 → 6.0.1) smaller than the beta-vs-stable exposure already accepted in §3.4. Full reasoning in README §3.4.1; §3.1, §8.1, §8.3, §11, §12 updated to match — driver 570.195.03 vs. 6.0.1's tested 595.58.03 is now a recorded, accepted gap, not a defect to fix by recreating.
 
-**Remaining — 🧑 Julian, next pod session:**
+**Remaining — 🧑 Julian, next pod session, same pod:**
 
-- [ ] 🧑 **Recreate the pod once more, fixing two things at once.** The volume's contents survive a recreate, so this costs only the pod.
-  - **Filter for CUDA Version 13.0** (= driver 580.x; 12.8 is the 570 branch we got, 13.2 is 595 and warned against).
-  - **Correct the tag to `nvcr.io/nvidia/isaac-lab:3.0.0-beta2`.** The current pod is on **`-post1`**, which is Isaac Sim **6.0.1** — tested at driver 595.58.03, so on the current 570 host it is two branches below tested rather than one. This is exactly the four-character trap README §8.3 describes, and it pulled cleanly, as predicted.
-  - Keep the volume at `/idtb` and `ACCEPT_EULA=Y`.
-- [ ] 🧑 **Re-run `infra/preflight.sh` and require a clean verdict this time.** Paste the output. If egress is still dead, its `curl` exit code is the diagnosis and the session stops there — nothing downstream works without it.
-- [ ] 🧑 **Run `infra/bootstrap.sh`**, then stop/restart the pod and confirm caches survived (no re-download). That restart is the only proof the relocation works — a cache that is silently not persisting looks exactly like a slow first run.
+- [ ] 🧑 **Confirm egress properly, don't just route around it.** The 2026-09-16 survey found zero egress on all four endpoints; downloading the repo via `curl --resolve codeload.github.com:443:<ip> .../tar.gz` worked, which points at DNS resolution specifically (matching the Docker-embedded-resolver quirk `bootstrap.sh` now documents) rather than the network being down. Re-run `infra/preflight.sh` **without** any `--resolve` workaround and see if it passes on its own — `docker login nvcr.io` and Isaac's first-run asset fetch will hit the same DNS path, and neither can be worked around per-command the way the tarball download was.
+- [x] 🧑🤖 **Get the fixed `infra/bootstrap.sh` onto the pod, then run it.** Done via the tarball re-fetch — confirmed the fix works exactly as designed: `/isaac-sim/kit` reported `BLOCKED` (root-owned, as predicted) while every other cache still relocated, including `/root/.cache/*` — which turned out writable by uid 1000 on this image, unlike `/isaac-sim/kit`, so no HOME fallback was even needed here.
+- [x] 🧑🤖 **Chown `/isaac-sim/kit` — found to be impossible, then found not to matter.** `su` and `sudo` both fail from inside the container (no `sudo` binary at all), so the suggested root-shell fix doesn't exist on this image. Checked what's actually lost: `ls -ld` / `stat` on `/isaac-sim/kit/cache` confirmed it's `ubuntu:ubuntu` and writable — only the *parent* `/isaac-sim/kit` blocks the relocation, so Isaac's own runtime writes into the cache are unaffected. The real cost is that `kit/cache` (the largest persisted cache) doesn't survive a pod restart/recreate, paid as a slower cold start each time that happens, not per command. A custom-image rebuild (`chown` + the already-known `ENTRYPOINT []` fix) was considered and **declined** — same reasoning as §3.4.1: new surface (a registry to maintain) for a minor, already-mitigated cost. `bootstrap.sh` now reports this as a non-fatal `NOTE` and exits `0` — no skip flag added; there's nothing to configure, it's just no longer treated as a failure with a fix to chase. README §8.3 and `tests/test_infra_scripts.py` updated to match.
+- [ ] 🧑 **Stop/restart the pod and confirm caches survived (no re-download).** That restart is the only proof the relocation works — a cache that is silently not persisting looks exactly like a slow first run.
 - [ ] 🧑 **Run a shipped Isaac Lab tutorial and look at the PNG** — separates "environment broken" from "my blind code broken". 2 minutes, zero code, saves an ambiguous debugging session later.
 
   ```
@@ -97,7 +96,7 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
   ./isaaclab.sh -p scripts/tutorials/00_sim/create_empty.py --headless
   ```
 
-> **If 580-branch hosts are unobtainable**, do not quietly proceed on 570. README §3.4 records the fallback — Isaac Sim 5.0.0 + Isaac Lab 2.2.0 + Python 3.11 — and why it is a genuine downgrade (older than 5.1.0, so it loses the `TiledCamera` fix the throughput plan rests on). That is a decision to take deliberately, not a default to drift into.
+> **The driver gap (570.195.03 vs. tested 595.58.03) is accepted, not pending.** No further step in this checklist is about closing it. README §3.4.1 explains why: it's a "tested on" figure, not a hard floor (Kit itself only refuses below 535.129), and the real check is the §7.2 spike measuring the renderer directly on this exact host. If a render or determinism result later looks wrong in a way nothing else explains, this is the first thing to revisit — and the escape hatch (Isaac Sim 5.0.0 + Isaac Lab 2.2.0 + Python 3.11, README §3.4.1) is recorded for that case, not for routine use.
 
 ---
 
