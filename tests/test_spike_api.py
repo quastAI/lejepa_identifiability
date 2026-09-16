@@ -278,6 +278,30 @@ def test_frame_hash_is_content_addressed():
     assert spike.frame_hash(frame(7)) != spike.frame_hash(frame(8))
 
 
+def test_franka_usd_path_correction_matches_the_verified_broken_path():
+    """The shipped FRANKA_PANDA_CFG.spawn.usd_path 404s -- verified by direct HEAD
+    request against the real asset tree, not assumed. The asset moved under
+    Legacy/; the config was never updated to match.
+    """
+    broken = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/IsaacLab/Robots/FrankaEmika/panda_instanceable.usd"
+    fixed = spike.correct_franka_usd_path(broken)
+    assert fixed == (
+        "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0"
+        "/Isaac/IsaacLab/Robots/FrankaEmika/Legacy/panda_instanceable.usd"
+    )
+
+
+def test_franka_usd_path_correction_leaves_other_paths_alone():
+    """A non-match must not be silently forced -- it might mean upstream already
+    fixed it, or it's pointing somewhere this patch has no business touching.
+    """
+    already_fixed = "https://example.com/Assets/Robots/FrankaEmika/Legacy/panda_instanceable.usd"
+    assert spike.correct_franka_usd_path(already_fixed) is None
+    assert spike.correct_franka_usd_path("https://example.com/Robots/Other/thing.usd") is None
+    assert spike.correct_franka_usd_path(None) is None
+    assert spike.correct_franka_usd_path("") is None
+
+
 def test_report_never_lets_one_check_stop_the_rest():
     """One boot, one full report: the whole reason the spike is shaped this way."""
     report = spike.Report(verbose=False)

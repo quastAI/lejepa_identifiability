@@ -43,6 +43,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import os
 import time
 import traceback
 from collections.abc import Callable, Mapping, Sequence
@@ -54,6 +55,15 @@ import torch
 
 Tensor = torch.Tensor
 Capture = Callable[[Any], Tensor]
+
+# The image's HUB__ARGS__DETECT_ONLY=true forbids Hub from starting, while
+# omni.client's own default ("shared") asks it to anyway -- the two contradict
+# each other and the result is ~35 retry warnings over ~10s at every boot
+# (IsaacLab #6971, merged; still open for this exact image as #7732). Hub is a
+# local USD caching layer, not required for https:// resolution at all (Isaac
+# Lab disables it the same way for kitless runs, #6985), so silencing it costs
+# nothing. `setdefault`: an operator's own env.sh export always wins.
+os.environ.setdefault("OMNICLIENT_HUB_MODE", "disabled")
 
 # ---------------------------------------------------------------------------
 # Pure layer: no Isaac, no globals. Unit-tested locally.
@@ -349,6 +359,29 @@ def resolve(paths: Sequence[str]) -> tuple[Any, str]:
     raise CheckFailed("no candidate path resolved:\n  " + "\n  ".join(errors))
 
 
+# The shipped FRANKA_PANDA_CFG's usd_path 404s on the real asset tree -- the
+# object moved under a Legacy/ subfolder upstream and the config was never
+# updated to match. Verified by direct HEAD request against the asset tree, not
+# assumed -- no tracked issue found for this specific divergence. Franka is the
+# only shipped robot config with this split (checked Unitree, ANYbotics, UR,
+# Kuka/Allegro); nothing else needs this patch.
+FRANKA_USD_BROKEN_SUFFIX = "Robots/FrankaEmika/panda_instanceable.usd"
+FRANKA_USD_LEGACY_SUFFIX = "Robots/FrankaEmika/Legacy/panda_instanceable.usd"
+
+
+def correct_franka_usd_path(current: str | None) -> str | None:
+    """Return the fixed path, or ``None`` if ``current`` doesn't match the known bug.
+
+    Pure string patch, no Isaac involved -- tested here rather than trusted only
+    on the pod. A non-match is not an error: it means either the config has
+    already been fixed upstream, or points somewhere this patch shouldn't touch,
+    and the caller records that rather than silently forcing a rewrite.
+    """
+    if current and current.endswith(FRANKA_USD_BROKEN_SUFFIX):
+        return current[: -len(FRANKA_USD_BROKEN_SUFFIX)] + FRANKA_USD_LEGACY_SUFFIX
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Isaac layer: every import lives inside a function, after SimulationApp exists.
 # ---------------------------------------------------------------------------
@@ -411,9 +444,27 @@ def build_rig(args: argparse.Namespace) -> Rig:
     )
     notes["franka_cfg_path"] = franka_path
 
+    try:
+        current_usd = franka_cfg.spawn.usd_path
+        legacy_usd = correct_franka_usd_path(current_usd)
+        if legacy_usd is not None:
+            franka_cfg = franka_cfg.replace(spawn=franka_cfg.spawn.replace(usd_path=legacy_usd))
+            notes["franka_usd_path"] = f"corrected (Legacy/): {current_usd!r} -> {legacy_usd!r}"
+        else:
+            notes["franka_usd_path"] = f"left as-is, unexpected suffix: {current_usd!r}"
+    except Exception as exc:
+        notes["franka_usd_path"] = f"could not correct: {type(exc).__name__}: {exc}"
+
     height, width = args.resolution
 
-    def make_scene_cfg(*, semantics: bool, tiled: bool, rich_camera: bool):
+    def make_scene_cfg(*, semantics: bool, tiled: bool, rich_camera: bool, suffix: str):
+        # Every prim path carries `suffix`, unique per ladder rung. A failed
+        # InteractiveScene() call can leave prims it already created sitting on
+        # the stage -- USD construction has no transactional rollback -- and the
+        # next rung would otherwise die on "prim already exists" instead of its
+        # own error. Distinct paths sidestep that without touching the stage or
+        # SimulationContext between attempts, which is not a reset this script
+        # is confident is safe mid-run.
         cube_spawn_kwargs: dict[str, Any] = {
             "size": (0.06, 0.06, 0.06),
             "rigid_props": sim_utils.RigidBodyPropertiesCfg(),
@@ -436,19 +487,21 @@ def build_rig(args: argparse.Namespace) -> Rig:
 
         @configclass
         class SpikeSceneCfg(InteractiveSceneCfg):
-            ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+            ground = AssetBaseCfg(
+                prim_path=f"/World/ground_{suffix}", spawn=sim_utils.GroundPlaneCfg()
+            )
             dome = AssetBaseCfg(
-                prim_path="/World/DomeLight",
+                prim_path=f"/World/DomeLight_{suffix}",
                 spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.9, 0.9, 0.9)),
             )
-            robot = franka_cfg.replace(prim_path="{ENV_REGEX_NS}/Robot")
+            robot = franka_cfg.replace(prim_path="{ENV_REGEX_NS}/Robot_" + suffix)
             cube = RigidObjectCfg(
-                prim_path="{ENV_REGEX_NS}/Cube",
+                prim_path="{ENV_REGEX_NS}/Cube_" + suffix,
                 spawn=sim_utils.CuboidCfg(**cube_spawn_kwargs),
                 init_state=RigidObjectCfg.InitialStateCfg(pos=(0.45, 0.0, 0.03)),
             )
             camera = CameraCfg(
-                prim_path="{ENV_REGEX_NS}/Camera",
+                prim_path="{ENV_REGEX_NS}/Camera_" + suffix,
                 update_period=0.0,
                 height=height,
                 width=width,
@@ -466,7 +519,7 @@ def build_rig(args: argparse.Namespace) -> Rig:
         @configclass
         class SpikeSceneWithTiledCfg(SpikeSceneCfg):
             tiled_camera = TiledCameraCfg(
-                prim_path="{ENV_REGEX_NS}/TiledCamera",
+                prim_path="{ENV_REGEX_NS}/TiledCamera_" + suffix,
                 update_period=0.0,
                 height=height,
                 width=width,
@@ -495,10 +548,13 @@ def build_rig(args: argparse.Namespace) -> Rig:
     # whole run, and which rung answered is itself a §4.4 correction.
     scene = None
     attempts = []
-    for semantics, tiled, rich in ((True, True, True), (True, False, True), (False, False, False)):
+    rungs = ((True, True, True), (True, False, True), (False, False, False))
+    for rung_index, (semantics, tiled, rich) in enumerate(rungs):
         try:
             scene = InteractiveScene(
-                make_scene_cfg(semantics=semantics, tiled=tiled, rich_camera=rich)
+                make_scene_cfg(
+                    semantics=semantics, tiled=tiled, rich_camera=rich, suffix=f"r{rung_index}"
+                )
             )
             notes["scene_variant"] = {"semantics": semantics, "tiled": tiled, "rich_camera": rich}
             break
