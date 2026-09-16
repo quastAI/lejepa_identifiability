@@ -79,26 +79,51 @@ MSG
   fi
 fi
 
+# Parent directories we were not allowed to modify, newline-separated. Collected
+# rather than fatal: aborting mid-list leaves some caches relocated and some not,
+# which looks half-done rather than failed -- the same trap as the HOME problem
+# above. A string, not an array, because the dev machine under test runs bash 3.2
+# where an empty array expansion is itself an error under set -u.
+blocked=""
+
 # real path -> directory on the volume
 link_cache() {
   local real_path="$1" target="$VOL/cache/$2"
+  local parent="${real_path%/*}"
   # Paths under $ISAACSIM_ROOT_PATH only exist inside the Isaac image; skip them
   # cleanly on a bare pod rather than creating a dangling symlink in /.
-  if [[ "$real_path" != "$HOME"/* && ! -d "$(dirname "$real_path")" ]]; then
+  if [[ "$real_path" != "$HOME"/* && ! -d "$parent" ]]; then
     echo "    $real_path (skipped -- not in this image)"
+    return
+  fi
+  if [[ -L "$real_path" && "$(readlink -f "$real_path")" == "$(readlink -f "$target")" ]]; then
+    echo "    $real_path (already linked)"
+    return
+  fi
+  # Replacing a path with a symlink is a write to its *parent*, so the image
+  # leaving /isaac-sim/kit root-owned blocks this however readable the cache
+  # itself is. Measured on the pod: rm failed with Permission denied after the
+  # copy had already run. Some parents do not exist yet and get created, so the
+  # permission that matters is on the nearest ancestor that does exist.
+  local probe="$parent"
+  while [[ ! -e "$probe" ]]; do
+    probe="${probe%/*}"
+    [[ -n "$probe" ]] || probe="/"
+  done
+  if [[ ! -w "$probe" ]]; then
+    blocked="${blocked}${probe}"$'\n'
+    echo "    $real_path (BLOCKED -- $probe is not writable by $(id -un))"
     return
   fi
   mkdir -p "$target"
   if [[ -L "$real_path" ]]; then
-    [[ "$(readlink -f "$real_path")" == "$(readlink -f "$target")" ]] \
-      && { echo "    $real_path (already linked)"; return; }
     rm "$real_path"
   elif [[ -d "$real_path" ]]; then
     # preserve anything the image shipped or a previous run downloaded
     cp -an "$real_path/." "$target/" 2>/dev/null || true
     rm -rf "$real_path"
   fi
-  mkdir -p "$(dirname "$real_path")"
+  mkdir -p "$parent"
   ln -s "$target" "$real_path"
   echo "    $real_path -> $target"
 }
@@ -157,7 +182,7 @@ fi
 
 cat <<EOF
 
-Bootstrap complete.
+Bootstrap done.
 
   code      $CHECKOUT
   datasets  $VOL/data
@@ -173,3 +198,25 @@ broken" stay separable.
   cd \${ISAACLAB_PATH:-/workspace/isaaclab}
   ./isaaclab.sh -p scripts/tutorials/00_sim/create_empty.py --headless
 EOF
+
+# Last, loudest, and a non-zero exit: everything above succeeded, which is
+# exactly why this needs to be hard to miss. The caches the image owns are the
+# largest ones, and a run that reported success while leaving them in place buys
+# a full re-download on every pod start -- the one thing the volume exists to
+# prevent, and invisible until someone wonders why boots are slow.
+if [[ -n "$blocked" ]]; then
+  blocked_dirs=$(printf '%s' "$blocked" | sort -u)
+  cat >&2 <<MSG
+
+INCOMPLETE -- $(printf '%s\n' "$blocked_dirs" | wc -l | tr -d ' ') path(s) could not be modified by $(id -un) (uid $(id -u)),
+so the caches under them were left where the image put them.
+
+From a root shell on this pod, once:
+
+$(printf '%s\n' "$blocked_dirs" | sed "s|^|    chown -R $(id -u):$(id -g) |")
+
+then re-run this script. Everything else above is already done and will be
+skipped as "already linked".
+MSG
+  exit 1
+fi

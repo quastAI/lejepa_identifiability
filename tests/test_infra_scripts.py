@@ -334,6 +334,34 @@ def test_bootstrap_end_to_end_and_idempotent(pod):
     assert (vol / "cache" / "kit" / "shipped.bin").exists()
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anything -- nothing to detect")
+def test_bootstrap_survives_a_root_owned_isaac_tree(pod):
+    """The image leaves ``/isaac-sim/kit`` root-owned while running as uid 1000.
+
+    Replacing a path with a symlink is a write to its *parent*, so the cache
+    being readable is irrelevant. Measured on the pod: ``rm`` failed with
+    Permission denied *after* the copy, and ``set -e`` took the run down with
+    half the caches relocated — the state that looks half-done rather than
+    failed. Every other cache must still be relocated, and the one that was not
+    must be impossible to miss.
+    """
+    sim_root = pod["tmp"] / "isaac-sim"
+    (sim_root / "kit").chmod(0o555)
+    try:
+        r = run(BOOTSTRAP, pod["env"])
+    finally:
+        (sim_root / "kit").chmod(0o755)  # or tmp_path cleanup fails
+
+    assert "BLOCKED" in r.stdout, "silently skipped a cache the volume exists to hold"
+    # Not fatal where it happens: the rest of the list still gets done.
+    assert (pod["home"] / ".cache" / "ov").is_symlink()
+    assert (pod["vol"] / "data").is_dir()
+    # But the run does not get to report success.
+    assert r.returncode == 1
+    assert "INCOMPLETE" in r.stderr
+    assert f"chown -R {os.getuid()}:{os.getgid()} {sim_root / 'kit'}" in r.stderr
+
+
 def test_bootstrap_skips_isaac_paths_outside_the_image(pod):
     """On a bare pod /isaac-sim is absent; that must not leave a dangling link."""
     absent = pod["tmp"] / "absent-sim-root"
