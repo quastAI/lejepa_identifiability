@@ -4,7 +4,7 @@
 
 ## Context
 
-Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 is built and Phase 2's version question is resolved — **onto the pod already running, not a re-selected one** (README §3.4.1: two attempts to select a host by driver both failed to land the target branch, so the plan stopped chasing it) — and Phase 3 onwards is open.
+Starting point: the repo had **no source code** — only README.md, LICENSE, and the paper PDF. Phase 1 and Phase 2 are both done: versions resolved onto the pod already running rather than a re-selected one (README §3.4.1 — two attempts to select a host by driver both failed to land the target branch, so the plan stopped chasing it), and a real headless Isaac Lab tutorial has since completed successfully on that driver. Phase 3 onwards is open.
 
 Every Isaac API signature in README §4.4 came from reading docs, **never from running anything**. So: meet the Isaac API first in one spike script, then design the protocol against verified reality. The README's current order (protocol + mock first, Isaac at Phase 3) would mean designing the central abstraction against guesses.
 
@@ -44,7 +44,7 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 ---
 
-## Phase 2 — Pod setup — 🟡 on the vendor image, on the pod we're keeping; bootstrap not yet clean
+## Phase 2 — Pod setup — ✅ done
 
 > **No Dockerfile needed.** NVIDIA ships a prebuilt headless `nvcr.io/nvidia/isaac-lab` image on NGC. README §8.3's custom image is unnecessary — pull the vendor image, put our code on the volume.
 
@@ -84,11 +84,11 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 **Remaining — 🧑 Julian, next pod session, same pod:**
 
-- [ ] 🧑 **Confirm egress properly, don't just route around it.** The 2026-09-16 survey found zero egress on all four endpoints; downloading the repo via `curl --resolve codeload.github.com:443:<ip> .../tar.gz` worked, which points at DNS resolution specifically (matching the Docker-embedded-resolver quirk `bootstrap.sh` now documents) rather than the network being down. Re-run `infra/preflight.sh` **without** any `--resolve` workaround and see if it passes on its own — `docker login nvcr.io` and Isaac's first-run asset fetch will hit the same DNS path, and neither can be worked around per-command the way the tarball download was.
+- [x] 🧑🤖 **Confirm egress properly, don't just route around it.** Confirmed transient: re-ran `infra/preflight.sh` with no `--resolve` workaround and all four endpoints reached cleanly (`nvcr.io` 401, the rest 200), matching the Docker-embedded-resolver theory rather than a dead network. Same run also confirmed the tag check now passes (`isaac sim version 6.0.1-rc.7+release.42383.32955d8d.gl` matches the updated `WANT_SIM=6.0.1`) and measured **Python 3.12.13** on the pod's bundled interpreter — turns the §3.1 Python row from an inference into a confirmed fact. Only remaining `FAIL` is the accepted driver gap (now 580.159.04 vs. tested 595.58.03 — narrower than the 570.195.03 seen earlier, still below, still accepted per §3.4.1).
 - [x] 🧑🤖 **Get the fixed `infra/bootstrap.sh` onto the pod, then run it.** Done via the tarball re-fetch — confirmed the fix works exactly as designed: `/isaac-sim/kit` reported `BLOCKED` (root-owned, as predicted) while every other cache still relocated, including `/root/.cache/*` — which turned out writable by uid 1000 on this image, unlike `/isaac-sim/kit`, so no HOME fallback was even needed here.
 - [x] 🧑🤖 **Chown `/isaac-sim/kit` — found to be impossible, then found not to matter.** `su` and `sudo` both fail from inside the container (no `sudo` binary at all), so the suggested root-shell fix doesn't exist on this image. Checked what's actually lost: `ls -ld` / `stat` on `/isaac-sim/kit/cache` confirmed it's `ubuntu:ubuntu` and writable — only the *parent* `/isaac-sim/kit` blocks the relocation, so Isaac's own runtime writes into the cache are unaffected. The real cost is that `kit/cache` (the largest persisted cache) doesn't survive a pod restart/recreate, paid as a slower cold start each time that happens, not per command. A custom-image rebuild (`chown` + the already-known `ENTRYPOINT []` fix) was considered and **declined** — same reasoning as §3.4.1: new surface (a registry to maintain) for a minor, already-mitigated cost. `bootstrap.sh` now reports this as a non-fatal `NOTE` and exits `0` — no skip flag added; there's nothing to configure, it's just no longer treated as a failure with a fix to chase. README §8.3 and `tests/test_infra_scripts.py` updated to match.
-- [ ] 🧑 **Stop/restart the pod and confirm caches survived (no re-download).** That restart is the only proof the relocation works — a cache that is silently not persisting looks exactly like a slow first run.
-- [ ] 🧑 **Run a shipped Isaac Lab tutorial and look at the PNG** — separates "environment broken" from "my blind code broken". 2 minutes, zero code, saves an ambiguous debugging session later.
+- [x] 🧑🤖 **Confirm caches survive, properly** — a same-container restart wouldn't prove anything (the container's own ephemeral layer survives a restart regardless of relocation), so the pod was **deleted and recreated**, not restarted. Landed on a new container (`f0e893a3661e`) at driver **580.159.04** — narrower gap than 570.195.03, still below 595.58.03, still accepted (§3.4.1). Both `infra/preflight.sh` and `infra/bootstrap.sh` re-ran clean: `bootstrap.sh` correctly recreated the `$HOME` symlinks from scratch (a fresh container has no symlinks of its own yet — `already linked` only applies to a same-container restart) pointing at the same `/idtb/cache/*` content, and `/isaac-sim/kit` reported its `NOTE` again as expected. Also re-confirmed the tag check passes and Python is 3.12.13 on this pod too. **Directly verified**, not just inferred from clean symlinking: `ls -la /idtb/cache/ov` shows `_cache.lock` timestamped **before** the previous (now-deleted) pod's own preflight run, with a fully populated `DerivedDataCache`/`Kit`/`shaders`/`texturecache`/`ogn_generated` structure — content that could only exist by surviving at least one prior delete+recreate cycle.
+- [x] 🧑🤖 **Run a shipped Isaac Lab tutorial** — `create_empty.py --headless` completed cleanly (`[INFO]: Setup complete...`) on the new pod's driver 580.159.04. This is the first **direct, empirical** evidence against a driver-mismatch crash, not just the documentation-based reasoning in §3.4.1. **Correction: no PNG.** This tutorial is scene composition, not rendering — the "look at the PNG" framing assumed the wrong tutorial existed to check against. A real visual/determinism check is Spike 1 (§7.2), not a separate step. One thing to watch later, not now: Kit's `OmniHub` helper failed to launch and retried ~44 times (~14s) before continuing without it — harmless here (no external assets needed), worth attention once a script streams the Franka asset.
 
   ```
   source /idtb/env.sh
@@ -96,7 +96,9 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
   ./isaaclab.sh -p scripts/tutorials/00_sim/create_empty.py --headless
   ```
 
-> **The driver gap (570.195.03 vs. tested 595.58.03) is accepted, not pending.** No further step in this checklist is about closing it. README §3.4.1 explains why: it's a "tested on" figure, not a hard floor (Kit itself only refuses below 535.129), and the real check is the §7.2 spike measuring the renderer directly on this exact host. If a render or determinism result later looks wrong in a way nothing else explains, this is the first thing to revisit — and the escape hatch (Isaac Sim 5.0.0 + Isaac Lab 2.2.0 + Python 3.11, README §3.4.1) is recorded for that case, not for routine use.
+> **The driver gap (now 580.159.04 vs. tested 595.58.03) is accepted, not pending.** No further step in this checklist is about closing it. README §3.4.1 explains why: it's a "tested on" figure, not a hard floor (Kit itself only refuses below 535.129), and the real check is the §7.2 spike measuring the renderer directly on this exact host — reinforced now by a real headless boot completing on this driver. If a render or determinism result later looks wrong in a way nothing else explains, this is the first thing to revisit — and the escape hatch (Isaac Sim 5.0.0 + Isaac Lab 2.2.0 + Python 3.11, README §3.4.1) is recorded for that case, not for routine use.
+
+**Phase 2 is done.** Every item above is closed. Next is Phase 3 — the spike.
 
 ---
 
