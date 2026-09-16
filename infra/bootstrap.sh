@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Make an ephemeral pod reusable: put every cache on the network volume, fix
-# ownership, and check out the code. Idempotent -- safe to re-run on every pod.
+# Make an ephemeral pod reusable: put every cache on the network volume and fix
+# ownership. Idempotent, and needs no network -- safe to re-run on every pod.
 #
 # Without this, each pod start re-downloads gigabytes of Omniverse assets and
 # recompiles shader caches on paid GPU time (README §8.3). Caches are relocated
@@ -31,9 +31,12 @@ fi
 
 # Not /workspace: the vendor image already owns that path (see the guard below).
 VOL="${IDTB_VOL:-/idtb}"
-REPO="${IDTB_REPO:-https://github.com/quastAI/lejepa_identifiability.git}"
-REF="${IDTB_REF:-main}"
-CHECKOUT="$VOL/repo"
+
+# This script lives in the repo, so the repo is already here by the time it runs.
+# It used to clone one as its last step, which was circular -- and it cloned to a
+# second location, so the checkout you edited and the checkout Isaac ran were
+# different directories. It reports what is here and never fetches.
+CHECKOUT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Isaac Lab v3.0.0-beta2 unpacks itself into /workspace/isaaclab (docker/.env.base,
 # DOCKER_ISAACLAB_PATH). A network volume mounted at /workspace shadows it, and
@@ -140,34 +143,17 @@ echo "==> environment at $VOL/env.sh"
 sed 's/^/    /' "$VOL/env.sh"
 
 
-# Docker's embedded DNS proxy (127.0.0.11) is sometimes not forwarding yet just
-# after the container boots: hostname lookups fail while raw IP connectivity is
-# fine, and it clears itself within seconds. Measured on the pod, and a known
-# provider quirk rather than anything about this image. Under set -e a single
-# hit kills the whole bootstrap, after the caches have been relocated -- so this
-# is the one step that retries. It is the same failure preflight.sh reports as
-# curl exit 6; if it is still failing after 5 attempts it is not a race.
-git_retry() {
-  local n=0
-  until "$@"; do
-    n=$((n + 1))
-    if ((n >= 5)); then
-      echo "git failed after 5 attempts -- check DNS: getent hosts github.com" >&2
-      exit 1
-    fi
-    echo "    git failed, retrying in ${IDTB_GIT_RETRY_SLEEP:-5}s ($n/5)..."
-    sleep "${IDTB_GIT_RETRY_SLEEP:-5}"
-  done
-}
-
 echo "==> code at $CHECKOUT"
 if [[ -d "$CHECKOUT/.git" ]]; then
-  git_retry git -C "$CHECKOUT" fetch --depth 1 origin "$REF"
-  git -C "$CHECKOUT" checkout -q FETCH_HEAD
+  echo "    $(git -C "$CHECKOUT" log -1 --oneline 2>/dev/null || echo '<git cannot read it>')"
 else
-  git_retry git clone --depth 1 --branch "$REF" "$REPO" "$CHECKOUT"
+  echo "    not a git checkout -- 'git pull' will not update it"
 fi
-echo "    $(git -C "$CHECKOUT" log -1 --oneline)"
+# A checkout outside the volume lives in the container's own filesystem and is
+# gone on the next pod start, along with anything edited on the pod.
+if [[ "$CHECKOUT" != "$VOL" && "$CHECKOUT" != "$VOL"/* ]]; then
+  echo "    WARNING: not on $VOL -- this checkout does not survive a pod restart"
+fi
 
 cat <<EOF
 

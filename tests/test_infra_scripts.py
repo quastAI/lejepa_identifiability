@@ -272,7 +272,7 @@ def test_bootstrap_relocates_every_vendor_cache():
 
 @pytest.fixture
 def pod(tmp_path):
-    """A sandboxed stand-in for a fresh pod: fake home, Isaac root and origin."""
+    """A sandboxed stand-in for a fresh pod: fake home, fake Isaac root, volume."""
     home = tmp_path / "home"
     (home / ".cache").mkdir(parents=True)
     sim_root = tmp_path / "isaac-sim"
@@ -280,17 +280,6 @@ def pod(tmp_path):
     (sim_root / "kit" / "cache" / "shipped.bin").write_text("from the image")
     vol = tmp_path / "vol"
     vol.mkdir()
-
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    git = ["git", "-C", str(origin)]
-    subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
-    (origin / "README.md").write_text("x")
-    subprocess.run([*git, "add", "-A"], check=True)
-    subprocess.run(
-        [*git, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
-        check=True,
-    )
 
     return {
         "tmp": tmp_path,
@@ -300,8 +289,6 @@ def pod(tmp_path):
             "HOME": str(home),
             "IDTB_VOL": str(vol),
             "ISAACSIM_ROOT_PATH": str(sim_root),
-            "IDTB_REPO": str(origin),
-            "IDTB_REF": "main",
         },
     }
 
@@ -331,8 +318,13 @@ def test_bootstrap_end_to_end_and_idempotent(pod):
     if not exported:
         assert "not root" in env_sh, "silently omitted it instead of saying why"
     assert f'export IDTB_VOL="{vol}"' in env_sh
-    assert (vol / "repo" / ".git").is_dir()
-    assert (vol / "data").is_dir() and (vol / "logs").is_dir()
+    assert (vol / "data").is_dir()
+    assert (vol / "logs").is_dir()
+
+    # It never clones: the script ships inside the repo, so a checkout it could
+    # clone into is one you already have. Cloning made a second copy, and the
+    # one you edited was then not the one Isaac ran.
+    assert not (vol / "repo").exists(), "bootstrap created a second checkout"
 
     # Re-run: every pod start runs this, so a second run must be a no-op.
     second = run(BOOTSTRAP, pod["env"])
@@ -396,55 +388,35 @@ def test_bootstrap_keeps_a_working_home(pod):
     assert "not writable" not in r.stdout
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
-def test_bootstrap_retries_the_checkout_through_a_dns_race(pod, tmp_path):
-    """Docker's embedded DNS is briefly not forwarding just after container boot.
+def test_bootstrap_needs_no_network_at_all(pod, tmp_path):
+    """Nothing it does is allowed to depend on the network.
 
-    Hostname lookups fail while IP connectivity is fine, and it clears itself
-    within seconds. It is the *last* step of the script, so a single hit throws
-    away a bootstrap that has already relocated every cache.
+    The repo has to be present for this script to exist, so fetching one was
+    circular; with ``git`` itself broken the run must still complete, because a
+    pod's DNS is briefly dead right after boot and the caches are already moved
+    by the time the last step runs.
     """
-    stub = tmp_path / "stub-bin"
-    stub.mkdir()
-    counter = tmp_path / "attempts"
-    git = stub / "git"
-    git.write_text(
-        "#!/usr/bin/env bash\n"
-        f'n=$(cat "{counter}" 2>/dev/null || echo 0); echo $((n + 1)) > "{counter}"\n'
-        'if (( n < 2 )); then echo "fatal: could not resolve host: github.com" >&2; exit 128; fi\n'
-        f'exec {shutil.which("git")} "$@"\n'
-    )
-    git.chmod(0o755)
-
-    r = run(
-        BOOTSTRAP,
-        {
-            **pod["env"],
-            "PATH": f"{stub}:{os.environ['PATH']}",
-            "IDTB_GIT_RETRY_SLEEP": "0",
-        },
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "retrying" in r.stdout
-    assert (pod["vol"] / "repo" / ".git").is_dir(), "the checkout never happened"
-
-
-@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
-def test_bootstrap_gives_up_on_a_persistent_dns_failure(pod, tmp_path):
-    """Retrying forever would turn a dead network into a hung pod session."""
     stub = tmp_path / "stub-bin"
     stub.mkdir()
     git = stub / "git"
     git.write_text("#!/usr/bin/env bash\necho 'could not resolve host' >&2\nexit 128\n")
     git.chmod(0o755)
 
-    r = run(
-        BOOTSTRAP,
-        {**pod["env"], "PATH": f"{stub}:{os.environ['PATH']}", "IDTB_GIT_RETRY_SLEEP": "0"},
-    )
-    assert r.returncode == 1
-    assert "after 5 attempts" in r.stderr
-    assert "getent hosts github.com" in r.stderr, "no way to tell DNS from a bad URL"
+    r = run(BOOTSTRAP, {**pod["env"], "PATH": f"{stub}:{os.environ['PATH']}"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (pod["vol"] / "cache").is_dir(), "a broken git stopped the cache relocation"
+
+
+def test_bootstrap_reports_a_checkout_that_will_not_survive_a_restart(pod):
+    """A checkout in the container's own filesystem is gone on the next start.
+
+    Including whatever was edited on the pod. The script runs from inside the
+    repo, so it knows where that is and is the only thing positioned to say so.
+    """
+    r = run(BOOTSTRAP, pod["env"])
+    assert str(BOOTSTRAP.parent.parent) in r.stdout, "does not report which checkout it is in"
+    # The repo under test is on the dev machine, not on the fake volume.
+    assert "does not survive a pod restart" in r.stdout
 
 
 def test_bootstrap_handles_both_uid_regimes():
