@@ -104,12 +104,12 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 ## Phase 3 — The spike
 
-- [x] 🤖 **Write `spikes/spike_api.py`** — one standalone file. No protocol, no USD authoring. Isaac Lab's shipped `FRANKA_PANDA_CFG` + a cube + one camera. **Written; every check in the table below is implemented and unrun.** Four things about how it was built, all consequences of writing it blind:
+- [x] 🤖 **Write `spikes/spike_api.py`** — one standalone file. No protocol, no USD authoring. Isaac Lab's shipped `FRANKA_PANDA_CFG` + a cube + one camera. **Written, and run four times below — every check in the table has a verdict.** Four things about how it was built, all consequences of writing it blind:
   - **The detectors are pure and tested locally.** Everything above the "Isaac layer" banner (`determinism_report`, `convergence_report`, `sensitivity_report`, the `Report` registry, the uint8-safe diffs) imports no Isaac, so `tests/test_spike_api.py` runs it on macOS. That file is mostly **negative controls** — a stale renderer, an aliased buffer, a temporal leak, free-running MC noise — each asserting the matching report *fires*. Phase 4 wants these anyway (§10.1); having them now means the spike's verdict comes from detectors that have been watched detecting.
   - **A threshold test pins why §7.1 is bitwise:** a one-grey-level leak passes `tol=1.0` and fails `bitwise`, in the same assertion.
   - **Every Isaac symbol is resolved, not assumed.** `resolve()` tries the known spellings of `FRANKA_PANDA_CFG` and records which answered; the scene builds down a ladder (semantics+tiled+rich → plain rgb) so one unknown kwarg costs a recorded note, not the run; each preset's carb settings are read back, because carb silently creates unknown keys and only equality proves the path exists.
   - **Arm perturbation is a fraction of the *measured* half-range** (§5.2), not a hardcoded radian value.
-- [ ] 🤖 **Deliberate deviation to confirm on the pod: the `B ∈ {1,2,8,32}` sweep is across runs, not within one.** `num_envs` is fixed when the scene is built and `SimulationApp` is one-shot per process, so the script takes `--num-envs` and records it in `facts.json`; the table is assembled by running it four times. Cheaper than rebuilding a second scene mid-process, and each run stays a clean boot.
+- [ ] 🤖🧑 **Still open: the actual `B ∈ {1,2,8,32}` throughput sweep.** The *mechanism* is confirmed by every run so far (`num_envs` is fixed per process, `facts.json` records it each time) — what hasn't happened yet is running `spike_api.py --num-envs {1,8,32}` to fill out the table. All four runs so far used the default `--num-envs 2`.
 - [x] 🧑🤖 **First real run on the pod, on 2026-09-16 — found two defects, both in the spike script itself, before any real check could run.** `boot_and_versions` passed clean (torch 2.10.0+cu128, isaaclab 6.1.16, CUDA 12.8, RTX 4090); `scene_builds_and_measures` failed on all three ladder rungs. Both fixed and covered by `tests/test_spike_api.py`, not just patched blind:
   - **The retry ladder contaminated its own retries.** A failed `InteractiveScene()` call leaves whatever prims it already created sitting on the stage — USD construction has no transactional rollback — so rungs 2 and 3 died on `A prim already exists at path: '/World/ground'` instead of their own errors, masking the real problem behind two copies of a bug in the harness. Fixed by giving every prim path a per-rung suffix (`/World/ground_r0`, `_r1`, `_r2`, …) instead of trying to reset the stage between attempts — safer than guessing whether `omni.usd.get_context().new_stage()` plays cleanly with an already-constructed `SimulationContext`, which nothing here was confident about.
   - **`FRANKA_PANDA_CFG`'s shipped `usd_path` 404s.** The real error, once the ladder could actually show it: `FileNotFoundError` on `.../Robots/FrankaEmika/panda_instanceable.usd`. Researched rather than guessed at — confirmed by direct HEAD request against the real asset tree that the object moved under a `Legacy/` subfolder and the shipped config was never updated to match. No tracked issue number found for this one specifically; the code (`franka.py`) and the asset tree have simply diverged. Franka is the only shipped robot config with this split — Unitree, ANYbotics, UR and the Kuka/Allegro configs were checked and are fine. `build_rig()` now patches the one known-broken suffix via a pure, tested `correct_franka_usd_path()` and records what it did either way — corrected, left alone because the suffix didn't match (upstream already fixed it, or a different path entirely), or failed to patch — rather than assuming the fix still applies on a future isaaclab version.
@@ -154,15 +154,38 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
   > **Why sensitivity ranks above determinism.** Read-back + non-degenerate + same-state-equal + A/B/B/A are *all satisfied by a pipeline that renders the same stale frame every time* — Fabric flush never reaching the render graph, or a cached annotator buffer. That's the most deterministic possible pipeline and it's 100% garbage, discovered weeks later when R² comes out zero. Same logic for the aliasing check: if Isaac returns a view onto a reused buffer, A1 and A2 compare equal *because they're the same memory*.
 
-- [ ] 🧑 **Run it, paste the whole table.** Expect 2–4 iterations; keep the pod up between fixes under ~20 min (a cold boot costs more than the idle time)
-- [ ] 🤖 **Fix and re-run** until every check has a verdict. A FAIL is fine if *understood* — "TiledCamera black under RealTimePathTracing, matches #367, use `Camera`" is a completed check.
+- [x] 🧑 **Run it, paste the whole table.** Done — see the four run entries above; it took exactly the expected 2–4 iterations.
+- [x] 🤖 **Fix and re-run** until every check has a verdict. Done — 12/13 PASS, the one FAIL (`buffers_aliased`) is understood and permanent, same standard as "TiledCamera black under RealTimePathTracing, matches #367, use `Camera`" would have been.
+- [ ] 🤖 **Write `spikes/spike_dynamic_attrs.py` — Spike 1/2's follow-up, for everything outside physics-state writes.** Spike 1 proved `standard` (§7.3) is bitwise-deterministic and Spike 2 proved read-back is exact — but only for what changes between captures via `write_joint_state_to_sim`/`write_root_state_to_sim`: joint angles and rigid-body pose. Extending the latent set to cube **size** (a scale/geometry write) or **color** (a material-attribute write), or to any style/nuisance latent (lighting, per-sample camera jitter, exposure, table/background material, roughness, sensor noise, motion blur), uses a write path none of that proved anything about. This spike closes that gap before any of it gets wired into `SceneBackend` (Phase 4) as a first-class latent.
+
+  Reuses `spikes/spike_api.py`'s pure layer directly — `determinism_report`, `Report`, the uint8-safe diffs — rather than duplicating them; only the Isaac-layer rig needs to be new, and it can be smaller (no Franka needed: the open questions are all about the cube, the light, and the camera, so a minimal cube + light + camera scene boots faster and doesn't re-touch the already-solved Franka-asset problem).
+
+  Three structural rules, adapted from Spike 1:
+  1. **Never fail fast**, same as `spike_api.py` — one PASS/FAIL table, one `facts.json`, every check isolated.
+  2. **One write path per check.** A failure writing cube color must not block finding out whether writing light intensity works — the whole point is isolating which of these mechanisms exist and which don't.
+  3. **Resolve, don't guess.** Where the exact API call for an attribute (scale, material color, light intensity, exposure) isn't known, try candidates and record which one answered — `spike_api.py`'s `resolve()` pattern for `FRANKA_PANDA_CFG`, not a single guess that crashes the boot.
+
+  | Check | What it answers |
+  |---|---|
+  | Cube scale write + read-back | Is a size latent writable per-sample at all, and does the collision volume follow the visual scale |
+  | Determinism under `standard`, varying only scale between captures | Does this write path preserve the bitwise reproducibility Spike 1 measured, or does it leak/corrupt like the default render mode did |
+  | Cube material color write + read-back | Is a color latent writable per-sample via the USD material API |
+  | Determinism under `standard`, varying only material color | Same question, for the material write path |
+  | Light attribute write (intensity / color temperature) + determinism | The first nuisance-latent write path, and whether it's compatible with `standard` |
+  | Camera re-aimed *every capture*, not just once at boot, + determinism | `set_world_poses_from_view` was only ever called once in Spike 1; per-sample jitter is a different usage pattern |
+  | Exposure: does a carb/post-process setting exist and accept a value | Locates the actual lever for an "exposure" nuisance latent, if there is one |
+  | Motion blur under the teleport-no-step model | **Expected candidate for an understood FAIL, not a bug to force past.** Blur implies motion over time; this pipeline has none by design (§5.5). A clean FAIL here, with the reason recorded, is a completed check — same philosophy as Spike 1's aliasing FAIL. |
+  | Sensor noise injection point | Spike 1 already ruled out renderer-native noise (determinism requires disabling it) — this just confirms synthetic noise, if wanted, is a `generate.py`-side concern, not a render-settings one |
+
 - [ ] 🧑 **Save a few rendered arrays + their generating state, pull them down** — so the mock is built to real conventions, not assumed ones. Still open — `spike_api.py` doesn't currently save frames to disk, only stats to `facts.json`.
 - [x] 🤖 **README checkpoint 2** — §7.2 rewritten with all four Spike answers; §7.3 `standard` preset now a real measured carb config (`PathTracing`, `spp=1`, `totalSpp=64`, denoiser off); §5.5 confirmed (zero `sim.step()`, measured, not assumed); §5.2 joint limits promoted from provisional to measured for the four active arm joints + gripper (cube position stays provisional — no table in the spike scene); §3.1/§3.2 Decision Register updated (four Spike questions moved from deferred to decided, plus the unplanned camera-aliasing finding added); §11 Risk Register rows closed/updated to match.
-- [ ] 🧑 **Stop the pod**
+- [x] 🧑 **Stop the pod** — done, 2026-09-16.
 
 ---
 
 ## Phase 4 — Build against verified reality
+
+> **Scope note on "verified": Spike 1/2 only cover physics-state writes** (joint angles, rigid-body pose). Cube size/color and every style/nuisance latent (lighting, per-sample camera jitter, exposure, materials, sensor noise, motion blur) use a different write path that hasn't been touched — see Phase 3's `spikes/spike_dynamic_attrs.py`. Don't wire any of those into `SceneBackend`/`generate.py` as a first-class latent before that spike has a verdict.
 
 - [ ] 🤖 **`SceneBackend` protocol** — now, not before. The risk was never the method *names*; it was granularity and semantics, which the spike just settled.
   - Batched from the start (`B=1` valid) — absorbs the TiledCamera question either way
