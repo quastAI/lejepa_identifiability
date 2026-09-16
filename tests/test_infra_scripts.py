@@ -256,11 +256,7 @@ def test_preflight_never_fails_fast():
 
 def test_bootstrap_relocates_every_vendor_cache():
     body = BOOTSTRAP.read_text()
-    linked = [
-        line.split('"')[1]
-        for line in body.splitlines()
-        if line.startswith("link_cache ")
-    ]
+    linked = [line.split('"')[1] for line in body.splitlines() if line.startswith("link_cache ")]
     assert linked, "no link_cache calls found"
     for cache in VENDOR_CACHES:
         # $SIM_ROOT defaults to /isaac-sim; compare on the resolved form.
