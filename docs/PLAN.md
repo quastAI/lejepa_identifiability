@@ -212,7 +212,7 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 > re-aim, `exposure` is a post-process setting. **None of these has been touched**, and
 > none of Spike 1's verdicts transfers to them by default.
 
-- [ ] 🤖 **Write `spikes/spike_dynamic_attrs.py`.** Reuses `spikes/spike_api.py`'s pure layer directly — `determinism_report`, `sensitivity_report`, `Report`, the uint8-safe diffs — rather than duplicating it. Only the Isaac-layer rig is new, and it can be *smaller*: no Franka is needed, since every open question is about the cube, the lights, the table and the camera, so a minimal cube + light + camera scene boots faster and does not re-touch the already-solved Franka-asset problem.
+- [x] 🤖 **Write `spikes/spike_dynamic_attrs.py`.** Written, unrun -- next step is Julian on the pod. Reuses `spikes/spike_api.py`'s pure layer directly — `determinism_report`, `sensitivity_report`, `Report`, the uint8-safe diffs — rather than duplicating it. Only the Isaac-layer rig is new, and it can be *smaller*: no Franka is needed, since every open question is about the cube, the lights, the table and the camera, so a minimal cube + light + camera scene boots faster and does not re-touch the already-solved Franka-asset problem.
 
   Three structural rules, adapted from Spike 1:
   1. **Never fail fast** — one PASS/FAIL table, one `facts.json`, every check isolated. `SimulationApp` is one-shot per process and boot is slow.
@@ -243,6 +243,15 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
   | **Cross-talk**: writing style knobs leaves the `base` read-back unchanged | both | A camera re-aim or a scale write that perturbs physics state would silently corrupt the task latents — cheap to check, expensive to discover later |
   | Motion blur under teleport-no-step | `style` | **Expected clean FAIL, not a bug to force past.** Blur implies motion over time; this pipeline has none by design (§5.5). A recorded reason is a completed check, same as Spike 1's aliasing FAIL. |
   | Sensor noise injection point | — | Confirms synthetic noise, if ever wanted, is a `generate.py` post-process on an already-deterministic frame, never a render setting (README §5.2.3) |
+
+  **Written blind, three choices worth flagging before the first pod run:**
+  - **No `InteractiveScene`, no env-namespace templating.** Every prim (`/World/Ground`, `/World/Light`, `/World/Cube`, `/World/Camera`) sits at a fixed absolute path this script chose itself, and the `Camera` sensor is instantiated directly rather than pulled from a scene registry. Spike 1's `{ENV_REGEX_NS}` multi-env resolution existed only to make the #251 frozen-at-origin bug unmissable at metres scale — not a concern here, so the whole mechanism is sidestepped rather than reused.
+  - **Raw `pxr` (`UsdGeom.XformCommonAPI`, `UsdShade.MaterialBindingAPI`, `UsdLux.LightAPI`) is the primary write mechanism**, not higher-level Isaac Lab convenience wrappers — chosen because these are stable, long-standing OpenUSD schema APIs rather than Isaac-Lab-version-specific ones, which is exactly the kind of guess that broke `FRANKA_PANDA_CFG`'s `usd_path` in Spike 1. `try_candidates()` (a generalisation of `spike_api.resolve()` to arbitrary write attempts, not just import paths) is the fallback wherever more than one call could plausibly be right — e.g. resolving which prim under the cube actually holds its shader.
+  - **One reusable `run_knob_check()` procedure** runs the three-question recipe (write → read-back, sensitivity, determinism) for every `full`/`style` attribute, rather than five near-duplicate check functions — mirrors Spike 1's own "determinism/convergence as reusable functions" rule, generalised one level further since this spike repeats the same three-step recipe five times where Spike 1 only repeated two.
+
+  Two things this file does **not** attempt, both flagged inline as the parts a real pod run should sanity-check first: the exact carb key names for `exposure`/`motion blur` (read from documentation, never run — that's exactly what "resolve, don't guess" is for), and the light-rotation Euler decomposition's angle order (correct relative to the `Gf.Rotation` math, but worth a visual check that a shadow actually moves where azimuth/elevation say it should).
+
+  Pure-layer tests in `tests/test_spike_dynamic_attrs.py` cover `try_candidates`, `hue_to_rgb`, `azel_to_direction`, and `cube_size_radius_from_aperture` — everything below the "Isaac layer" banner, same split as Spike 1. 101/101 tests and `ruff check` green locally as of 2026-09-17.
 
 - [ ] 🧑 **Run it on the pod, paste the whole table.** Same expectation as Spike 1: 2–4 iterations before every check has a verdict.
 - [ ] 🤖 **Fix and re-run** until every check has a verdict — a recorded FAIL with a reason counts.

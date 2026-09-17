@@ -265,12 +265,13 @@ lejepa_identifiability/
 │   └── analysis/                    # LeJEPA training · metrics
 ├── spikes/
 │   ├── spike_api.py                 # physics-state writes, 4 spikes    ✅ built
-│   └── spike_dynamic_attrs.py       # attribute writes: full + style    ⬜ §7.5
+│   └── spike_dynamic_attrs.py       # attribute writes: full + style ✅ written, ⬜ unrun
 ├── tests/
 │   ├── test_ou.py, test_spec.py     # tier 0 — pure                  ✅ built
 │   ├── test_import_guard.py         # tier 0 — §4.2 enforced         ✅ built
 │   ├── test_spike_api.py            # tier 0 — the spike's detectors    ✅ built
 │   │                                # + negative controls that fire
+│   ├── test_spike_dynamic_attrs.py  # tier 0 — resolve()/hue/azel/aperture ✅ built
 │   ├── contract/                    # tier 1 — parametrized over backend
 │   └── isaac/                       # tier 2 — pod only
 ├── scenes/                          # stage_v1_tabletop.usd, materials/
@@ -1142,11 +1143,12 @@ Two tracks, and they are independent.
 
 **Track B — build what needs no decisions (local, start now):**
 
-0. **Group support in the pure layer** — `Handle.group`, `LatentSpec.dims/subset/rho_vector/group_of_dim` with the base→full→style ordering contract, and a vector-ρ `sample_ou_pairs`. None of it depends on a measurement: the *structure* is decided (§5.2), only the radii and the membership of individual knobs wait on Spike 5. Tier-0 tests: cumulative group membership, `dims("base")` is a prefix of `dims("full")`, ordering violations rejected, block cross-covariance with zero on the style block.
+0. ~~**Group support in the pure layer** — `Handle.group`, `LatentSpec.dims/subset/rho_vector/group_of_dim` with the base→full→style ordering contract, and a vector-ρ `sample_ou_pairs`.~~ **Done, 2026-09-17** (docs/PLAN.md Phase 3a). None of it depended on a measurement: the *structure* was decided (§5.2), only the radii and the membership of individual knobs still wait on Spike 5. Tier-0 tests: cumulative group membership, `dims("base")` is a prefix of `dims("full")`, ordering violations rejected, block cross-covariance with zero on the style block.
 
 1. ~~OU sampler, `LatentSpec`, squash — with tier-0 tests.~~ **Done.** Plus the package scaffolding, the §4.2 import guard as an executable test, and the two pod scripts Track A needs.
-2. ~~`spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast.~~ **Written, unrun.** Its detectors are pure and covered by `tests/test_spike_api.py`, which is mostly negative controls — a stale renderer, an aliased buffer, a temporal leak — so the verdict it eventually returns comes from detectors that have been watched detecting (§10.1). Run by Track A.
-3. Then, against what the spike measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.
+2. ~~`spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast.~~ **Written, run four times, answered (§7.2).**
+3. ~~`spikes/spike_dynamic_attrs.py` — Spike 5, the `full`/`style` attribute write paths.~~ **Written, unrun** (docs/PLAN.md Phase 3b). Reuses `spike_api.py`'s pure layer rather than duplicating it; its own new pure helpers (`try_candidates`, `hue_to_rgb`, `azel_to_direction`, `cube_size_radius_from_aperture`) are covered by `tests/test_spike_dynamic_attrs.py`. Run by Track A.
+4. Then, against what both spikes measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.
 
 > ### Closing note on sequencing
 >
