@@ -7,6 +7,16 @@ from idtb.latents import Handle, LatentSpec
 
 SPEC = LatentSpec((Handle("arm.j0", 0.0, 1.5), Handle("cube.x", 0.4, 0.1)))
 
+MIXED_SPEC = LatentSpec(
+    (
+        Handle("arm.j0", 0.0, 1.5, group="base"),
+        Handle("cube.x", 0.4, 0.1, group="base"),
+        Handle("cube.size", 0.05, 0.02, group="full"),
+        Handle("light.intensity", 500.0, 200.0, group="style"),
+        Handle("cam.jitter.x", 0.0, 0.01, group="style"),
+    )
+)
+
 
 def test_registry_bookkeeping():
     assert SPEC.n == 2
@@ -70,3 +80,69 @@ def test_saturation_flags_exactly_where_float32_injectivity_dies():
     # ...and the flagged pair really has collapsed: distinct latents, one state.
     assert phi[2] == phi[3]
     assert phi[0] != phi[1]
+
+
+# --- Latent groups (README §5.2, §5.4.1) --------------------------------------
+
+
+def test_group_defaults_to_base():
+    assert Handle("arm.j0", 0.0, 1.5).group == "base"
+
+
+def test_rejects_unknown_group():
+    with pytest.raises(ValueError):
+        Handle("bad", 0.0, 1.0, group="nuisance")
+    with pytest.raises(ValueError):
+        Handle.from_limits("bad", -1.0, 1.0, group="nuisance")
+
+
+def test_from_limits_passes_group_through():
+    handle = Handle.from_limits("cube.size", lo=0.0, hi=0.04, group="full")
+    assert handle.group == "full"
+
+
+def test_out_of_order_spec_raises():
+    """base, then full, then style -- the ordering that makes dims("base") a prefix."""
+    with pytest.raises(ValueError):
+        LatentSpec(
+            (
+                Handle("light.intensity", 500.0, 200.0, group="style"),
+                Handle("arm.j0", 0.0, 1.5, group="base"),
+            )
+        )
+
+
+def test_dims_are_cumulative_for_base_and_full_but_not_style():
+    assert MIXED_SPEC.dims("base") == (0, 1)
+    assert MIXED_SPEC.dims("full") == (0, 1, 2)
+    assert MIXED_SPEC.dims("style") == (3, 4)
+    # base is a *prefix* of full, by construction of the ordering contract.
+    assert MIXED_SPEC.dims("full")[: len(MIXED_SPEC.dims("base"))] == MIXED_SPEC.dims("base")
+
+
+def test_dims_rejects_unknown_group():
+    with pytest.raises(ValueError):
+        MIXED_SPEC.dims("nuisance")
+
+
+def test_group_of_dim_matches_handle_order():
+    assert MIXED_SPEC.group_of_dim == ("base", "base", "full", "style", "style")
+
+
+def test_subset_squash_agrees_with_full_spec_on_those_dims():
+    z = torch.randn(8, MIXED_SPEC.n)
+    full_phi = MIXED_SPEC.squash(z)
+    for group in ("base", "full", "style"):
+        dims = MIXED_SPEC.dims(group)
+        subset = MIXED_SPEC.subset(group)
+        assert torch.equal(subset.squash(z[:, dims]), full_phi[:, dims])
+
+
+def test_rho_vector_puts_rho_task_on_base_and_full_rho_style_on_style():
+    rho_vec = MIXED_SPEC.rho_vector(0.95, rho_style=0.1)
+    assert rho_vec.tolist() == pytest.approx([0.95, 0.95, 0.95, 0.1, 0.1])
+
+
+def test_rho_vector_defaults_style_to_zero():
+    rho_vec = MIXED_SPEC.rho_vector(0.95)
+    assert rho_vec.tolist() == pytest.approx([0.95, 0.95, 0.95, 0.0, 0.0])

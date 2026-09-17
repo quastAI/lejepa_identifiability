@@ -180,15 +180,15 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 > *radii* and the group membership of individual knobs wait on Phase 3b, and those
 > are data, not code. This is Track B work: it can land before the pod is next up.
 
-- [ ] 🤖 **`Handle.group`** — a fourth field, `"base" | "full" | "style"`, defaulting to `"base"` so every existing call site and test keeps working unchanged. `from_limits` grows a `group=` keyword. Reject any other value at construction; three groups is the decision (README §3.1), not a placeholder for an open vocabulary.
-- [ ] 🤖 **Ordering contract in `LatentSpec.__post_init__`** — handles must appear `base`, then `full`, then `style`. Enforced, not documented: it is what makes `dims("base")` a *prefix* of `dims("full")`, which in turn is what lets latent index *i* mean the same physical thing in a `base` run and a `full` run. A spec that interleaves them raises.
-- [ ] 🤖 **Group views on `LatentSpec`**
+- [x] 🤖 **`Handle.group`** — a fourth field, `"base" | "full" | "style"`, defaulting to `"base"` so every existing call site and test keeps working unchanged. `from_limits` grows a `group=` keyword. Reject any other value at construction; three groups is the decision (README §3.1), not a placeholder for an open vocabulary.
+- [x] 🤖 **Ordering contract in `LatentSpec.__post_init__`** — handles must appear `base`, then `full`, then `style`. Enforced, not documented: it is what makes `dims("base")` a *prefix* of `dims("full")`, which in turn is what lets latent index *i* mean the same physical thing in a `base` run and a `full` run. A spec that interleaves them raises.
+- [x] 🤖 **Group views on `LatentSpec`**
   - `dims(group) -> tuple[int, ...]` — **cumulative**: `dims("full")` returns base *and* full-tagged dims; `dims("style")` returns only style dims (disjoint).
   - `subset(group) -> LatentSpec` — a narrower spec preserving dimension order.
   - `group_of_dim -> tuple[str, ...]` — per-dimension tags, stored with every shard (README §6.4) so the analysis slices by tag instead of re-deriving the split from role-name prefixes.
   - `rho_vector(rho_task, *, rho_style=0.0) -> Tensor[n]` — `rho_task` on base/full dims, `rho_style` on style dims. A *parameter*, not a hardcoded zero: §5.4.1 predicts a spectrum crossing at ρ_style = ρ_task² that only a sweep can test.
-- [ ] 🤖 **Vector ρ in `sample_ou_pairs`** — accept a scalar *or* a length-*n* tensor. The update `z' = ρz + √(1−ρ²)η` is already elementwise, so this is broadcasting plus validation; the scalar path must stay bitwise identical to today's.
-- [ ] 🤖 **Tier-0 tests**, in the same change:
+- [x] 🤖 **Vector ρ in `sample_ou_pairs`** — accept a scalar *or* a length-*n* tensor. The update `z' = ρz + √(1−ρ²)η` is already elementwise, so this is broadcasting plus validation; the scalar path must stay bitwise identical to today's.
+- [x] 🤖 **Tier-0 tests**, in the same change:
   - cumulative membership (`dims("full")` ⊇ `dims("base")`), and `dims("base")` is a *prefix*
   - an out-of-order spec raises; an unknown group name raises
   - `subset("base").squash(z)` agrees element-for-element with the full spec's squash on those dims
@@ -196,7 +196,7 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
   - scalar-ρ regression: same seed, scalar `0.95` vs. a constant vector `0.95` → bitwise equal
   - ρ vector of the wrong length, and any element outside [0, 1], both rejected
 
-**Done when:** `pytest` green, and a mixed `base`/`full`/`style` spec round-trips through sample → squash → group-slice with the style block measurably decorrelated.
+**Done when:** `pytest` green, and a mixed `base`/`full`/`style` spec round-trips through sample → squash → group-slice with the style block measurably decorrelated. **Done, 2026-09-17** — `src/idtb/latents/spec.py` and `ou.py`, 90/90 tests and `ruff check` green locally.
 
 ---
 

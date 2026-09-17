@@ -8,7 +8,7 @@ import math
 import pytest
 import torch
 
-from idtb.latents import sample_ou_pairs
+from idtb.latents import Handle, LatentSpec, sample_ou_pairs
 
 N, BATCH = 4, 200_000
 
@@ -67,3 +67,44 @@ def test_shape_and_dtype():
 def test_rejects_rho_outside_unit_interval(rho):
     with pytest.raises(ValueError):
         sample_ou_pairs(2, 2, rho)
+
+
+# --- Vector rho: the group-wiring gate (README §5.2, §5.4.1) -------------------
+
+
+def test_scalar_rho_matches_a_constant_vector_bitwise():
+    scalar_z, scalar_zn = _seeded(0.95, seed=3, batch=64)
+    vector_z, vector_zn = sample_ou_pairs(
+        N, 64, torch.full((N,), 0.95), generator=torch.Generator().manual_seed(3)
+    )
+    assert torch.equal(scalar_z, vector_z)
+    assert torch.equal(scalar_zn, vector_zn)
+
+
+@pytest.mark.parametrize("bad_rho", [torch.tensor([0.5, 0.5]), torch.tensor([-0.1, 0.5, 0.9, 0.2])])
+def test_rejects_rho_vector_of_the_wrong_length_or_out_of_range(bad_rho):
+    with pytest.raises(ValueError):
+        sample_ou_pairs(N, 2, bad_rho)
+
+
+def test_block_cross_covariance_is_zero_exactly_on_the_style_block():
+    """The only direct evidence that rho=0 reaches the style dims and no others."""
+    spec = LatentSpec(
+        (
+            Handle("arm.j0", 0.0, 1.5, group="base"),
+            Handle("cube.x", 0.4, 0.1, group="base"),
+            Handle("light.intensity", 500.0, 200.0, group="style"),
+        )
+    )
+    rho_vec = spec.rho_vector(0.95, rho_style=0.0)
+    z, z_next = sample_ou_pairs(
+        spec.n, BATCH, rho_vec, generator=torch.Generator().manual_seed(0)
+    )
+    cov = _cov(z, z_next)
+    tol = 5.0 / math.sqrt(BATCH)
+    task_block = spec.dims("full")  # base + full, i.e. everything but style here
+    style_block = spec.dims("style")
+    for i in task_block:
+        assert abs(cov[i, i] - 0.95) < tol
+    for i in style_block:
+        assert abs(cov[i, i]) < tol
