@@ -87,9 +87,9 @@ The purpose of this section is to keep the plan honest about the difference betw
 |---|---|---|
 | **Dataset storage format** (HDF5 / WebDataset / other) | Write behind a small writer interface; decide once the per-sample payload size and the training-side read pattern are known. | Phase 5 |
 | **Image resolution** | Candidates 128×128 and 224×224. Cheap to ablate; treat as an experimental variable rather than a configuration decision. | Phase 8 |
-| **Which `full`/`style` knobs are writable at all, and through which API call** | Spike 5 (§7.5) — `spikes/spike_dynamic_attrs.py`. A knob that cannot be written, or cannot be written deterministically, is not a latent no matter how much the design wants it to be. | Phase 3 |
-| **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the rest are not. | Phase 3 / Phase 2 |
-| **Whether `exposure` has a usable lever at all** | Spike 5. If no carb/post-process setting accepts a per-sample value, the handle is dropped rather than faked. | Phase 3 |
+| ~~Which `full`/`style` knobs are writable at all, and through which API call~~ | **Resolved, §7.5.** `cube.size` is writable and bitwise-deterministic. `cube.hue`, `light.*`, `cam.jitter` are writable but **not** bitwise-deterministic under `standard` — root cause open, blocking them as first-class latents (§11). | — |
+| **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the rest are moot until §7.5's determinism blocker is resolved. | Phase 3 / Phase 2 |
+| ~~Whether `exposure` has a usable lever at all~~ | **Resolved, §7.5.** Three carb keys accepted and measured to move pixels — but shows the same non-determinism as `light.*`/`cam.jitter`, so the same blocker applies. | — |
 
 The four Spike questions that used to live in this table (render mode/preset, physics-step requirement, accumulation depth N, `TiledCamera` vs. `Camera`) are all answered — moved to §3.1, §7.2.
 
@@ -796,38 +796,41 @@ jittered ad hoc inside the scene setup.
 - **Camera:** fixed intrinsics, high oblique angle, 2–3 views per §5.3. Intrinsics logged to dataset metadata and **held constant**; extrinsics carry a small `style` jitter about the nominal pose, bounded so §5.3's occlusion geometry is not substantially changed.
 - **Categorical factors stay out of *z*:** room swaps and discrete material choices are not squashable Gaussians (§5.2.3's box) and run as cross-dataset ablations instead.
 
-### 7.5 Spike 5 — the attribute write paths (`full` and `style`), open
+### 7.5 Spike 5 — the attribute write paths (`full` and `style`): `cube.size` clean, everything else blocked
 
-Spikes 1–4 cover one thing: **physics-state writes**. `write_joint_state_to_sim`
-and `write_root_state_to_sim` are verified to land, read back exactly and render
-deterministically. Every latent §5.2 adds beyond `base` moves through a *different*
-mechanism — a geometry write for `cube.size`, a USD material attribute for
-`cube.hue` and `table.*`, a light attribute for `light.*`, a per-capture camera
-re-aim for `cam.jitter.*`, a post-process setting for `exposure` — and **none of
-those has been touched**. `spikes/spike_dynamic_attrs.py` (docs/PLAN.md Phase 3)
-closes that gap before any of them is wired into `SceneBackend` as a first-class
-latent.
+`spikes/spike_dynamic_attrs.py` (docs/PLAN.md Phase 3b) ran Spikes 1–4's
+three-question recipe (does the write land, does it move pixels, is it still
+bitwise deterministic under `standard`) against every `full`/`style` write path:
+a geometry write for `cube.size`, a USD material write for `cube.hue`, light
+attributes for `light.*`, a per-capture camera re-aim for `cam.jitter.*`, and a
+post-process setting for `exposure`.
 
-Three questions per knob, and the order matters:
+**`cube.size` (geometry, `full`): bitwise-deterministic**, same standard as
+Spikes 1–2. **`cube.hue`, `light.intensity`, `light.warmth`,
+`light.azimuth_elevation`, `cam.jitter`: not bitwise-deterministic.** Two
+back-to-back captures of the *identical* value differ by a small (~1.7–2.6/255)
+but exactly reproducible amount (identical to 3+ decimals across separate
+process runs — not driver flakiness), localized (`--save-frames`) to ~15% of the
+frame on the varied object's own rendered surface, not a uniform shift or a
+background/shadow-edge artefact. `exposure` has a real, working lever (three carb
+keys measured to move pixels) but shows the same non-determinism.
 
-1. **Does the write land?** Per-attribute read-back, the §6.3 gate extended to a
-   path where `robot.data.*` does not apply. A silently ignored material write is
-   the §6.3 failure mode with a different asset API in front of it.
-2. **Does varying it alone move pixels, far above the noise floor?** This ranks
-   *above* determinism for the same reason §7.2 gives: a knob that writes cleanly
-   and renders deterministically but changes nothing visible is a **dead
-   dimension**. For a `style` knob that is worse than useless — the encoder scores
-   perfect invariance for free, and the headline result is an artefact of a knob
-   nobody checked was connected.
-3. **Is it still bitwise deterministic under `standard`?** Per knob, varying only
-   that knob between captures. Spike 1's verdict was measured with only physics
-   state changing; a material or light write re-triggering shader compilation or
-   accumulation reset is a different question with the same acceptance test.
+Four targeted fixes were each tried and cleanly falsified: raising render calls
+per capture 1→8, discarding a warm-up render before the measured one (regressed
+the previously-clean `cube.size`), applying the preset once at scene build
+instead of per-check, and widening the key light's angular size. None moved the
+affected checks in a consistent direction. **Root cause not identified.**
 
-Motion blur is expected to be a **clean, understood FAIL** rather than a bug to
-force past: blur implies motion over time and this pipeline has none by design
-(§5.5). Recording that reason is a completed check, in the same category as Spike
-1's aliasing FAIL.
+**Consequence:** on this exact pod/driver, `base` and `cube.size` meet §7.1's
+bitwise gate — Phase 4's `base`-only pipeline is unaffected. `full` beyond
+`cube.size`, and every tested `style` dimension, do **not** — generating data
+with them now would inject exactly the confound the determinism gate exists to
+catch. This blocks the `full`/`style` extension (§11 Risk Register) until the
+cause is found or a different render configuration is verified clean.
+
+Motion blur is a **separate, expected, understood FAIL**: blur implies motion
+over time and this pipeline has none by design (§5.5) — a completed check, same
+category as Spike 1's aliasing FAIL, not part of the blocker above.
 
 
 ## 8. Infrastructure
@@ -1110,7 +1113,7 @@ Mechanics:
 | Occlusion makes g non-injective; results look like encoder failure | High | Multi-view cameras, high oblique placement, per-sample visibility logging, injectivity proxy check. |
 | Cube rotational symmetry hides a latent dimension | High | Omit yaw from `base`; switch to a visually asymmetric object before introducing orientation latents (§5.2.1). |
 | A `style` knob is silently disconnected, so invariance is measured for free | High | **New with the group design.** A write that lands but changes no pixels is indistinguishable from a perfectly invariant encoder in every downstream metric. Mitigated by §7.5's per-knob sensitivity check, ranked above determinism, and by §10.1's style-sensitivity gate running on generated data, not only in the spike. |
-| `full`/`style` attribute write paths behave unlike the physics-state writes Spikes 1–2 verified | High | Spike 5 (§7.5) before any of them becomes a first-class latent; per-attribute read-back in `writer.py`, since `robot.data.*` does not cover a material or light write. Motion blur is expected to FAIL cleanly and be recorded as such. |
+| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | Critical | **Confirmed, not just anticipated.** Spike 5 (§7.5) measured `cube.hue`/`light.*`/`cam.jitter`/`exposure` failing §7.1's bitwise gate at a small (~1.7–2.6/255), fully reproducible magnitude; `cube.size` alone is clean. Four targeted fixes (render depth, warm-up render, preset-application frequency, light angular size) were each tried and falsified. Root cause open. Blocks `full` beyond `cube.size` and all of `style` until resolved or a different render configuration is verified clean — does not block the `base`-only pipeline. |
 | ρ_style = 0 breaks App. F's isotropy condition | Medium | §5.4.1 argues the break is in the benign direction — an infinitely fast dimension leaves the top of the spectrum rather than interleaving into it — but that is *our* reading, not the paper's. Treated as a falsifiable prediction: `R²(h → z_style) ≈ 0` is measured in every run, and the ρ_style sweep (§9 Phase 8) tests the predicted crossing at ρ_task². If style latents prove linearly decodable, the group split is wrong and gets rethought, not patched. |
 | `cube.size` confounds with camera distance under a single view | Medium | A larger cube further away renders near-identically to a smaller one nearer — non-injectivity of the same kind as §5.3's occlusion, introduced by the `full` group. Mitigated by the 2–3 cameras §5.3 already prescribes, and by keeping the size radius small relative to the depth range; the injectivity proxy in §10.1 is what would catch it. |
 | Bounded joints break Gaussianity of z | High | Absorbed tanh squash (§5.1). Never clip, never wrap. |

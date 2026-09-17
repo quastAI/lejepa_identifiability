@@ -205,14 +205,18 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 
 ## Phase 3b — Spike 5: the attribute write paths (`full` + `style`)
 
-> **This is the gate on the entire group design.** Spikes 1–4 measured
-> `write_joint_state_to_sim` and `write_root_state_to_sim` — §5.2's `base` group and
-> nothing else. `cube.size` is a geometry write, `cube.hue` and `table.*` are material
-> writes, `light.*` is a light-attribute write, `cam.jitter.*` is a per-capture camera
-> re-aim, `exposure` is a post-process setting. **None of these has been touched**, and
-> none of Spike 1's verdicts transfers to them by default.
+> **This is the gate on the entire group design — and it did not fully pass.**
+> Spikes 1–4 measured `write_joint_state_to_sim` and `write_root_state_to_sim` —
+> §5.2's `base` group and nothing else. `cube.size` is a geometry write, `cube.hue`
+> and `table.*` are material writes, `light.*` is a light-attribute write,
+> `cam.jitter.*` is a per-capture camera re-aim, `exposure` is a post-process
+> setting. **Result: `cube.size` gated clean; every other tested `full`/`style`
+> write path did not, at a small but confirmed, reproducible non-determinism with
+> no root cause found (README §7.5, §11).** `full` beyond `cube.size` and all of
+> `style` are blocked pending that cause or a different render configuration; the
+> `base`-only pipeline is not affected.
 
-- [x] 🤖 **Write `spikes/spike_dynamic_attrs.py`.** Written, unrun -- next step is Julian on the pod. Reuses `spikes/spike_api.py`'s pure layer directly — `determinism_report`, `sensitivity_report`, `Report`, the uint8-safe diffs — rather than duplicating it. Only the Isaac-layer rig is new, and it can be *smaller*: no Franka is needed, since every open question is about the cube, the lights, the table and the camera, so a minimal cube + light + camera scene boots faster and does not re-touch the already-solved Franka-asset problem.
+- [x] 🤖 **Write `spikes/spike_dynamic_attrs.py`.** Reuses `spikes/spike_api.py`'s pure layer directly — `determinism_report`, `sensitivity_report`, `Report`, the uint8-safe diffs — rather than duplicating it. Only the Isaac-layer rig is new, and it can be *smaller*: no Franka is needed, since every open question is about the cube, the lights, the table and the camera, so a minimal cube + light + camera scene boots faster and does not re-touch the already-solved Franka-asset problem.
 
   Three structural rules, adapted from Spike 1:
   1. **Never fail fast** — one PASS/FAIL table, one `facts.json`, every check isolated. `SimulationApp` is one-shot per process and boot is slow.
@@ -253,12 +257,12 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 
   Pure-layer tests in `tests/test_spike_dynamic_attrs.py` cover `try_candidates`, `hue_to_rgb`, `azel_to_direction`, and `cube_size_radius_from_aperture` — everything below the "Isaac layer" banner, same split as Spike 1. 101/101 tests and `ruff check` green locally as of 2026-09-17.
 
-- [ ] 🧑 **Run it on the pod, paste the whole table.** Same expectation as Spike 1: 2–4 iterations before every check has a verdict.
-- [ ] 🤖 **Fix and re-run** until every check has a verdict — a recorded FAIL with a reason counts.
-- [ ] 🧑 **While the pod is up anyway, close out Spike 1's two loose ends (not a blocker on Spike 5, just shared pod time — moved here from Phase 3, see the note there):**
-  - `spike_api.py --num-envs {1,8,32}` — fills out the `B ∈ {1,2,8,32}` throughput table
-  - `spike_api.py --save-frames` — writes a few captured frames + their generating state (joint pose, cube position) as `<out>/frames/*.pt` under the `pathtracing_denoiser_off` preset. **Added 2026-09-17**, not part of the original spike: it only writes stats to `facts.json`, so this flag was missing until now. `torch.load(path)` reads them back locally, no Isaac needed.
-- [ ] 🤖 **README checkpoint 3** — §5.2.2/§5.2.3 promoted from "write path unverified" to measured ranges and confirmed API calls, or the handle dropped with the reason recorded; §3.2's three deferred rows resolved into §3.1; §7.5 rewritten with the verdicts; §11's two new attribute-path risk rows closed or updated.
+- [x] 🧑 **Run it on the pod, paste the whole table.** Took ~7 iterations, more than Spike 1's 2–4 — see the fix log below.
+- [x] 🤖 **Fix and re-run** until every check has a verdict. Done, but not clean: `cube.size` and `exposure`'s lever are confirmed good; `cube.hue`/`light.*`/`cam.jitter` have a **recorded FAIL whose reason was not found** despite four targeted, each-falsified fix attempts (render depth 1→8, a discard-first warm-up render, preset applied once vs. per-check, widened light angular size) — see README §7.5 for the full verdict and §11 for the risk. `--save-frames` + a `diff_summary()` diagnostic (added mid-investigation) localized the non-determinism to ~15% of the frame on the varied object's own surface, ruling out a uniform accumulation leak or a background/shadow-edge artefact, without finding the actual cause.
+- [x] 🧑 **While the pod was up anyway, closed out Spike 1's two loose ends:**
+  - `spike_api.py --num-envs {1,8,32}` — throughput table filled in, but also surfaced a **new, separate finding**: `sensitivity_arm_and_cube` intermittently fails at `--num-envs 1` and `32` with the noise floor exploding to ~75 mad (vs. the verified 0.0) — confirmed *flaky*, not deterministic, by an identical repeat run passing cleanly. Not yet root-caused; a warm-up-capture mitigation was added to `check_sensitivity` but not verified to fix it (untested after the fix landed).
+  - `spike_api.py --save-frames` — added and run; frames pulled via base64 for visual inspection.
+- [x] 🤖 **README checkpoint 3** — §7.5 rewritten with the verdicts; §3.2's two relevant deferred rows resolved; §11's risk row updated to Critical with the confirmed finding.
 
 ---
 
