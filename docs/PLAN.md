@@ -257,7 +257,7 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 - [ ] 🤖 **Fix and re-run** until every check has a verdict — a recorded FAIL with a reason counts.
 - [ ] 🧑 **While the pod is up anyway, close out Spike 1's two loose ends (not a blocker on Spike 5, just shared pod time — moved here from Phase 3, see the note there):**
   - `spike_api.py --num-envs {1,8,32}` — fills out the `B ∈ {1,2,8,32}` throughput table
-  - Save a few rendered arrays + their generating state from `spike_api.py` to `/idtb/data/spike`, pull them down
+  - `spike_api.py --save-frames` — writes a few captured frames + their generating state (joint pose, cube position) as `<out>/frames/*.pt` under the `pathtracing_denoiser_off` preset. **Added 2026-09-17**, not part of the original spike: it only writes stats to `facts.json`, so this flag was missing until now. `torch.load(path)` reads them back locally, no Isaac needed.
 - [ ] 🤖 **README checkpoint 3** — §5.2.2/§5.2.3 promoted from "write path unverified" to measured ranges and confirmed API calls, or the handle dropped with the reason recorded; §3.2's three deferred rows resolved into §3.1; §7.5 rewritten with the verdicts; §11's two new attribute-path risk rows closed or updated.
 
 ---

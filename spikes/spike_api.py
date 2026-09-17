@@ -774,6 +774,13 @@ def main() -> int:
         help="rad / m; solver tolerance, not a render tolerance (§6.3)",
     )
     parser.add_argument("--presets", nargs="*", default=list(PRESET_CANDIDATES))
+    parser.add_argument(
+        "--save-frames",
+        action="store_true",
+        help="save a few captured frames + their generating state to <out>/frames "
+        "(docs/PLAN.md Phase 3 leftover -- so the mock is built to real conventions, "
+        "not assumed ones)",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
 
@@ -1220,6 +1227,61 @@ def main() -> int:
             return {"sha256": digest, "matched_previous_process": True}
 
         report.run("cross_process_determinism", check_cross_process)
+
+        # -- optional: a few real frames + generating state, for the mock ----
+        if args.save_frames:
+
+            def check_save_frames() -> dict[str, Any]:
+                current = need_rig()
+                preset_settings = apply_preset("pathtracing_denoiser_off")
+                capture = make_capture(current, depth=args.render_depth)
+                states = {
+                    "base": state_of(
+                        joint_pos=current.base_joint_pos, cube_local=current.cube_base_local
+                    ),
+                    "arm_only": state_of(
+                        joint_pos=current.perturbed_joint_pos, cube_local=current.cube_base_local
+                    ),
+                    "cube_only": state_of(
+                        joint_pos=current.base_joint_pos, cube_local=current.cube_moved_local
+                    ),
+                    "arm_and_cube": state_of(
+                        joint_pos=current.perturbed_joint_pos, cube_local=current.cube_moved_local
+                    ),
+                }
+                frames_dir = out_dir / "frames"
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                saved: dict[str, Any] = {}
+                for name, state in states.items():
+                    frame = capture(state).clone().cpu()
+                    path = frames_dir / f"{name}.pt"
+                    torch.save(
+                        {
+                            "rgb": frame,
+                            "joint_pos": state["joint_pos"].cpu(),
+                            "cube_local": state["cube_local"].cpu(),
+                            "preset": "pathtracing_denoiser_off",
+                            "render_depth": args.render_depth,
+                        },
+                        path,
+                    )
+                    saved[name] = {
+                        "path": str(path),
+                        "shape": list(frame.shape),
+                        "dtype": str(frame.dtype),
+                    }
+                return {
+                    "frames_dir": str(frames_dir),
+                    "saved": saved,
+                    "preset_applied": {
+                        "name": "pathtracing_denoiser_off",
+                        "settings": preset_settings,
+                    },
+                    "note": "load with torch.load(path) locally -- no Isaac needed, "
+                    "torch is a plain dependency",
+                }
+
+            report.run("save_sample_frames", check_save_frames)
 
     finally:
         payload = {
