@@ -18,12 +18,13 @@ The goal is a simulator that produces photorealistic image pairs *(x, x′)* who
 >
 > **2. There is no local development loop.** Isaac Sim supports Ubuntu 22.04/24.04 and Windows 11. **macOS is not supported**, the container is Linux-only, and there is **no CPU-only or software-rendering fallback**. On an Apple-silicon development machine, no Isaac code can execute at all. Every line of Isaac-touching code is written blind locally and exercised remotely. This is not a minor inconvenience — it is the single strongest argument for the backend seam in §4.3, and it should be treated as a first-class design driver rather than an operational detail.
 
-Four decisions matter more than the rest. Three are about protecting the *mathematical* validity of the experiment; the fourth is about being able to work at all.
+Five decisions matter more than the rest. Four are about protecting the *mathematical* validity of the experiment; the fifth is about being able to work at all.
 
 1. **Latent parameterisation via an absorbed squashing map.** The theory requires *z* to be exactly Gaussian with unbounded support, but joints and table surfaces are bounded. The fix is to keep *z ~ N(0, I)* genuinely unbounded and push a fixed deterministic squashing function into the mixing map *g*. Since the theory permits *g* to be an arbitrary nonlinear measurable map, this is free — and it eliminates the joint-limit wrapping artefact that degraded the paper's own Reacher results (their Table 2).
 2. **Renderer determinism.** The theory assumes *x = g(z)* is a deterministic function. A path tracer with a moving random seed or a temporal denoiser makes *g* stochastic and history-dependent, which silently invalidates the setup. **In current Isaac Sim releases this is the default behaviour, not an opt-in risk** — see §7.1. It must be engineered explicitly and verified numerically.
 3. **Injectivity of *g* under occlusion and object symmetry.** If the arm hides the cube, or if a symmetric cube looks identical at 0° and 90° yaw, then distinct *z* map to identical *x* and no encoder can recover them. This is the deepest scientific risk in the project and needs design mitigation from day one.
-4. **A mockable backend seam.** Because nothing Isaac-related runs locally, the pipeline is built against a narrow `SceneBackend` protocol with two implementations: the real Isaac backend and an analytic mock. The mock gives a local test loop, and — more importantly — gives the correctness gates a known-good reference, so that a gate which passes is actually evidence.
+4. **Three latent groups, not one flat vector.** The simulator's knobs split into what the downstream task *needs* (`base`), everything *task-related* a general version of the task would vary (`full` ⊇ `base`), and everything the task must never depend on (`style`). The first two are sampled at a shared ρ and must be recoverable; `style` is resampled *within* each positive pair (ρ = 0) so the encoder is pushed to be invariant to it, and is recorded in full so that invariance is measured rather than assumed. This makes "which latents must be identified" an explicit, revisable property of the spec instead of an accident of whichever handles happened to be listed. See §5.2.
+5. **A mockable backend seam.** Because nothing Isaac-related runs locally, the pipeline is built against a narrow `SceneBackend` protocol with two implementations: the real Isaac backend and an analytic mock. The mock gives a local test loop, and — more importantly — gives the correctness gates a known-good reference, so that a gate which passes is actually evidence.
 
 **Effort:** roughly **2 weeks** to a first defensible identifiability number on the single-cube scene, and **4–5 weeks** to a fully extensible room-scale pipeline with a full sweep. Detailed phasing in §9. These are estimates, not commitments.
 
@@ -33,7 +34,8 @@ Four decisions matter more than the rest. Three are about protecting the *mathem
 
 | Requirement | How Isaac Sim satisfies it | Residual work / caveat |
 |---|---|---|
-| Latents of a simple scene (cube pick-and-place, fixed arm) | Franka Panda USD ships with Isaac Sim; cube is a primitive rigid body. Full joint and pose state is readable and writable. | We must *define* what counts as the latent vector — a modelling decision, not a default. See §5. |
+| Latents of a simple scene (cube pick-and-place, fixed arm) | Franka Panda USD ships with Isaac Sim; cube is a primitive rigid body. Full joint and pose state is readable and writable. | We must *define* what counts as the latent vector — a modelling decision, not a default, and one split three ways: `base`, `full`, `style`. See §5.2. |
+| Nuisance variation the encoder should ignore (lighting, camera jitter, table dressing) | USD attributes and light prims are writable per sample, so nuisance factors can be *sampled* rather than merely fixed. | Those write paths are a **third** mechanism, verified by none of Spikes 1–4. See §7.5. |
 | Extensible: load scenes, add objects later | USD composition (references, sublayers, payloads) is designed for this. Room-scale assets and the Omniverse asset library plug in directly. | Latent dimension *n* grows with each object; encoder output dim *m* must track it. The paper flags *m ≠ n* as an open problem (their §7). |
 | Highly realistic rendering from the start | RTX path tracing with physically based materials, HDRI domes, area lights. This is the strongest renderer of any robotics sim. | Path tracing costs far more per frame than rasterisation, and the realtime modes are themselves temporally accumulating. Determinism must be forced. See §7. |
 | OU sampling capability | `write_joint_state_to_sim` and `write_root_pose_to_sim` allow arbitrary state teleport without physics rollout. Render immediately after. | Need a collision/validity policy for teleported states, and isotropic ρ across all latent dimensions. |
@@ -72,6 +74,12 @@ The purpose of this section is to keep the plan honest about the difference betw
 | **GPU: GeForce RTX 4090, 24 GB, compute capability 8.9** | Survey verdict (§8.1), and the advertised part was allocated on both surveyed hosts. RT cores present; above 6.0.0's minimum spec of RTX 4080 / 16 GB. The *rest* of the host — OS, glibc, core count, driver — is not a property of this decision and moves with every pod recreate; §8.1 records what each one measured. |
 | **The network volume mounts at `/idtb`, never at `/workspace`** | The image unpacks Isaac Lab into `/workspace/isaaclab` (`DOCKER_ISAACLAB_PATH`). A volume mounted at `/workspace` shadows it, and the symptom is a missing `isaaclab.sh` — which reads as a broken image, not a mount problem. Both pod scripts refuse `/workspace` outright. |
 | **The container runs as uid/gid 1000 — not root. Key on the uid, never the name** | `Dockerfile.base` does its setup as root and ends on `USER isaaclab`. A provider-supplied volume arrives root-owned, so uid 1000 cannot write it, and the image ships no `sudo`. The ownership fix has to happen from a root shell *before* the Isaac container needs the volume. `ACCEPT_EULA=Y` is required as a pod env var. The survey measured the account as **`ubuntu`**, not `isaaclab` — same uid, different name, because the 3.0 image's Ubuntu 24.04 base already ships a user at 1000. Both pod scripts use `id -u`, so the discrepancy is inert; a script that had matched on the username would not be. |
+| **Latents are split into three groups: `base` ⊆ `full`, and a disjoint `style`** | §5.2. `base` is what the downstream task needs, `full` adds every task-related factor, `style` is what the task must never depend on. One spec declares all of them; a run selects which are active. Without the split, "which latents must be recovered" is implicit in whichever spec file happened to be loaded. |
+| **`style` latents are resampled within the pair (ρ = 0) and excluded from the identification target — but not from the record** | §5.2, §5.4.1. Resampling is the mechanism that produces encoder invariance; recording them in full is what makes the invariance *measurable* (§10.2) rather than asserted. |
+| **Isotropic ρ is required among the dimensions we intend to identify, not across the whole vector** | §5.4.1. A dimension at ρ = 0 is infinitely fast, so it drops to the bottom of the transition spectrum rather than interleaving into the top of it — App. F's inequality is broken in the benign direction. Stated as a *prediction* the experiment tests (`R²(h → z_style) ≈ 0`), not as a citation. |
+| **Every source of variation is identified, recorded-as-nuisance, or held constant — there is no fourth category** | §7.4. Replaces the earlier "anything not in the latent vector is held exactly constant", which had no room for deliberate nuisance variation. |
+| **Cube colour is one `hue` handle, not three RGB handles** | §5.2.2. Hue is the discriminative axis for a colour-conditioned task and stays 1-D per object; RGB triples *n* per cube and its brightness axis confounds directly with the `style` lighting group, making the two effects inseparable. |
+| **Categorical factors (room swap, discrete material choice) never enter *z*** | §5.2.3. Not a monotone squash of a Gaussian, so it breaks Theorem 2's premise the same way clipping does. They run as cross-dataset ablations instead. |
 
 ### 3.2 Deferred — recorded here so that de-pinning does not lose the question
 
@@ -79,12 +87,17 @@ The purpose of this section is to keep the plan honest about the difference betw
 |---|---|---|
 | **Dataset storage format** (HDF5 / WebDataset / other) | Write behind a small writer interface; decide once the per-sample payload size and the training-side read pattern are known. | Phase 5 |
 | **Image resolution** | Candidates 128×128 and 224×224. Cheap to ablate; treat as an experimental variable rather than a configuration decision. | Phase 8 |
+| **Which `full`/`style` knobs are writable at all, and through which API call** | Spike 5 (§7.5) — `spikes/spike_dynamic_attrs.py`. A knob that cannot be written, or cannot be written deterministically, is not a latent no matter how much the design wants it to be. | Phase 3 |
+| **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the rest are not. | Phase 3 / Phase 2 |
+| **Whether `exposure` has a usable lever at all** | Spike 5. If no carb/post-process setting accepts a per-sample value, the handle is dropped rather than faked. | Phase 3 |
 
 The four Spike questions that used to live in this table (render mode/preset, physics-step requirement, accumulation depth N, `TiledCamera` vs. `Camera`) are all answered — moved to §3.1, §7.2.
 
 ### 3.3 Provisional — chosen to make progress, expected to be revised
 
-- The Stage-1 latent assignment in §5.2 (which four arm joints, which squash radii). Provisional until the Franka asset actually loads and joint limits are read back from it.
+- The `base` latent assignment in §5.2.1 (which four arm joints, which squash radii). Arm and gripper limits are now measured; cube x/y stays provisional until scene v1 has a table.
+- **Group membership of individual knobs.** `cube.size` and `cube.hue` sit in `full` because a generalised pick-and-place would vary them; `table.roughness` sits in `style` because it never would. Those are modelling judgements, and moving a knob between groups is a one-line spec change by design — the point of the `group` tag is that the decision is visible and revisable, not that it is settled.
+- ρ_style = 0 as the default. §5.4.1 predicts a spectrum crossing at ρ_style = ρ_task², which only a sweep can confirm; `rho_style` is a parameter for that reason.
 - ρ = 0.95 as the first generation configuration (§9, Phase 6). A starting point for the sweep, not a finding.
 - Cost figures in §8.4. Indicative only and known to move; verify at provisioning time.
 
@@ -251,7 +264,8 @@ lejepa_identifiability/
 │   ├── gen/                         # generate.py — dataset driver, sharded
 │   └── analysis/                    # LeJEPA training · metrics
 ├── spikes/
-│   └── spike_api.py                 # one standalone Isaac contact script ✅ built
+│   ├── spike_api.py                 # physics-state writes, 4 spikes    ✅ built
+│   └── spike_dynamic_attrs.py       # attribute writes: full + style    ⬜ §7.5
 ├── tests/
 │   ├── test_ou.py, test_spec.py     # tier 0 — pure                  ✅ built
 │   ├── test_import_guard.py         # tier 0 — §4.2 enforced         ✅ built
@@ -314,26 +328,126 @@ Use `tanh` rather than a hard clip: `tanh` is a bijection onto the open interval
 
 > **The float32 caveat.** `tanh` is injective in exact arithmetic, but in float32 the physical step per unit of latent falls below any write tolerance long before overflow — past |z| ≈ 5 — and rounds to the bound exactly past |z| ≈ 9. Distinct latents then teleport the scene to the *same* state, and *g* is non-injective there for a purely numerical reason. `LatentSpec.saturated(phi, atol=…)` flags it, measured in **physical** units against the same tolerance as the read-back gate. Never in latent space: `atanh` turns a micron of solver tolerance into an unbounded latent error. Saturation is logged per sample like visibility and collision, so it can be conditioned on rather than guessed at.
 
-### 5.2 Stage-1 latent specification (n = 7)
+### 5.2 Three latent groups — `base`, `full`, `style`
+
+A single flat latent vector conflates three different questions. The knobs the
+downstream task *needs*, the knobs a *general* version of the task would vary, and
+the knobs the task must never depend on are all "simulator parameters", but they
+want opposite treatment. Splitting them into three groups is what lets one spec,
+one sampler and one writer serve all three.
+
+| Group | Contains | Within-pair ρ | Identification target | The question it answers |
+|---|---|---|---|---|
+| **`base`** | The minimal set the downstream task needs. For single-cube pick-and-place: arm configuration, gripper aperture, cube position. | ρ_task | **yes** | Can LeJEPA recover the task-sufficient latents from photorealistic pixels at all? |
+| **`full`** | Everything *task-related* — a superset of `base`, adding what a general version of the task would vary: cube size, cube colour ("pick the **green** cube"), later a second object. | ρ_task | **yes** | Does identifiability survive as the task-relevant latent count grows? |
+| **`style`** | Everything the task never depends on and the encoder should ignore: room, table dressing, lighting, camera jitter, exposure, materials. | **0** | **no** — invariance target | Does resampling within the pair buy invariance, and at what cost to the two above? |
+
+**The groups are cumulative, not disjoint.** Each handle carries the *narrowest*
+group it belongs to, and a group's dimension set is that tag plus every narrower
+one: `base ⊆ full`, with `style` disjoint from both. Handles are stored in the
+order `base`, then `full`-tagged, then `style`, so `base` dims are a *prefix* of
+`full` dims and latent index *i* means the same physical thing in every
+configuration. A run selects which groups are active; inactive handles are held at
+their handle centre, never removed, so indices never shift between runs.
+
+**What "resample within the pair" means mechanically.** `base` and `full` dims
+share the single ρ_task of §5.4; `style` dims get ρ = 0, so *z′_style* is drawn
+independently of *z_style*. The two members of a positive pair then show the same
+arm in the same configuration and the same cube in the same place — under
+different light, from a jittered camera, on a differently dressed table. Nothing
+else about the setup changes: *z* is still exactly *N(0, Iₙ)* per view, still
+squashed by the same φ, still stored in full. **Style latents are sampled,
+squashed, written and recorded exactly like every other latent** — they are
+excluded from the *identification target*, not from the pipeline. That distinction
+is the design: there is no such thing here as uncontrolled variation, only
+variation we do or do not ask the encoder to recover (§7.4).
+
+#### 5.2.1 `base` — measured, n = 7
 
 **Arm joint limits (indices 0–3) and gripper aperture (index 4) are now measured**, not placeholders — read back from `robot.data.soft_joint_pos_limits` in `spikes/spike_api.py`'s `scene_builds_and_measures` check, 2026-09-16. **Cube position (indices 5–6) is still provisional** (see §3.3): the spike scene has a ground plane and a cube but no table object, so no table extent was ever measured — that comes with scene v1.
 
-| Index | Semantic factor | Physical handle | Measured limits (rad or m) | Squash φᵢ |
-|---|---|---|---|---|
-| 0 | Arm configuration | `panda_joint1` | `[-2.8973, 2.8973]` | cᵢ + rᵢ·tanh(zᵢ), rᵢ = a fraction of measured half-range |
-| 1 | Arm configuration | `panda_joint2` | `[-1.7628, 1.7628]` | same |
-| 2 | Arm configuration | `panda_joint4` | `[-3.0718, -0.0698]` — asymmetric about 0, `Handle.from_limits` centers on the midpoint regardless | same |
-| 3 | Arm configuration | `panda_joint6` | `[-0.0175, 3.7525]` — asymmetric too | same |
-| 4 | Gripper aperture | `panda_finger_joint1/2` | `[0.0, 0.04]` each | mapped into the measured aperture range |
-| 5–6 | Cube position on table | cube root pose x, y | **not yet measured — no table in the spike scene** | x₀ + r·tanh(z₅), y₀ + r·tanh(z₆), r set from the table extent, once scene v1 has one |
+| Index | Role | Semantic factor | Physical handle | Measured limits (rad or m) | Squash φᵢ |
+|---|---|---|---|---|---|
+| 0 | `arm.j0` | Arm configuration | `panda_joint1` | `[-2.8973, 2.8973]` | cᵢ + rᵢ·tanh(zᵢ), rᵢ = a fraction of measured half-range |
+| 1 | `arm.j1` | Arm configuration | `panda_joint2` | `[-1.7628, 1.7628]` | same |
+| 2 | `arm.j2` | Arm configuration | `panda_joint4` | `[-3.0718, -0.0698]` — asymmetric about 0, `Handle.from_limits` centers on the midpoint regardless | same |
+| 3 | `arm.j3` | Arm configuration | `panda_joint6` | `[-0.0175, 3.7525]` — asymmetric too | same |
+| 4 | `gripper.aperture` | Gripper aperture | `panda_finger_joint1/2` | `[0.0, 0.04]` each | mapped into the measured aperture range |
+| 5–6 | `cube.x`, `cube.y` | Cube position on table | cube root pose x, y | **not yet measured — no table in the spike scene** | x₀ + r·tanh(z₅), y₀ + r·tanh(z₆), r set from the table extent, once scene v1 has one |
 
-Cube *z*-height is held fixed at the table surface plus half the cube edge — a deterministic function of the other coordinates, not a free latent. Remaining Franka joints (`panda_joint3`, `panda_joint5`, `panda_joint7`) are held at a fixed nominal pose in Stage 1 so that *n* stays small and the arm configuration is uniquely determined by the active joints. The measured `default_joint_pos` for the four active joints is `[0.0, -0.569, -2.81, 3.037]` — notably *not* centered in the range for joints 2 and 3 above, which is fine: `Handle.from_limits` centers the squash on the limit midpoint, independent of whatever pose the robot happens to default to.
+Cube *z*-height is held at the table surface plus half the cube edge — a deterministic function of the other coordinates, not a free latent (and, once §5.2.2 makes edge length a latent, a function of *that*, which the writer must compute rather than bake in). Remaining Franka joints (`panda_joint3`, `panda_joint5`, `panda_joint7`) are held at a fixed nominal pose so that *n* stays small and the arm configuration is uniquely determined by the active joints. The measured `default_joint_pos` for the four active joints is `[0.0, -0.569, -2.81, 3.037]` — notably *not* centered in the range for joints 2 and 3 above, which is fine: `Handle.from_limits` centers the squash on the limit midpoint, independent of whatever pose the robot happens to default to.
 
 **What fraction of the half-range to actually keep is still open** — the limits above are hard PhysX bounds (`soft_joint_pos_limits`), and choosing `fraction < 1.0` in code (Phase 4) is a separate decision from having the raw numbers.
 
-> ### ⚠ Do not include cube yaw in Stage 1
+> ### ⚠ Do not include cube yaw in `base`
 >
-> A cube has 90° rotational symmetry about its vertical axis. Yaw values of 0 and π/2 render to *identical pixels*, making *g* non-injective and that latent dimension formally unrecoverable. Either (a) omit yaw, (b) restrict it to a range narrower than the symmetry period via the squash, or (c) replace the cube with a visually asymmetric object (a textured block, a mug, a toy) before adding yaw. Option (c) is the right long-term answer and should be the Stage-2 change.
+> A cube has 90° rotational symmetry about its vertical axis. Yaw values of 0 and π/2 render to *identical pixels*, making *g* non-injective and that latent dimension formally unrecoverable. Either (a) omit yaw, (b) restrict it to a range narrower than the symmetry period via the squash, or (c) replace the cube with a visually asymmetric object (a textured block, a mug, a toy) before adding yaw. Option (c) is the right long-term answer and belongs in `full`, alongside the other object-identity factors, once the scene has an asymmetric manipuland.
+
+#### 5.2.2 `full` — the task-related additions
+
+These are **not yet writable**. Everything in `base` moves through
+`write_joint_state_to_sim` / `write_root_state_to_sim`, the two paths Spikes 1–2
+verified (§7.2). Cube size is a geometry write and cube colour is a material
+write; neither has been touched, which is exactly what
+`spikes/spike_dynamic_attrs.py` (§7.5) exists to settle before either becomes a
+first-class latent.
+
+| Role | Semantic factor | Write path | Where the range comes from |
+|---|---|---|---|
+| `cube.size` | Cube edge length | geometry scale / `CuboidCfg` size — **not** a root-state write | Upper bound is a *measured task constraint*, not a preference: the gripper aperture measured in §5.2.1 is `[0.0, 0.04]` m per finger, so a cube the fingers cannot close on is outside the task by definition. Lower bound from the cube staying resolvable at the chosen resolution. |
+| `cube.hue` | Cube colour | USD material attribute (`PreviewSurface.diffuseColor`) | The hue circle, radius restricted so the squashed range never wraps — the same non-injectivity argument as the cube-yaw box above. |
+
+> ### Why one hue handle and not three RGB handles
+>
+> RGB buys nothing the task needs and costs injectivity. For a colour-conditioned
+> task ("pick the **green** cube") the discriminative axis *is* hue, and with
+> several cubes each simply gets its own hue handle — three channels per cube
+> would triple *n* for the same task structure. Worse, RGB varies brightness,
+> which is a **`style` factor**: two dark colours render near-identically under a
+> dim light, so *g* stops being injective in exactly the region where a style
+> latent is also moving, and the two effects become inseparable. Holding
+> saturation and value fixed keeps hue orthogonal to the lighting group by
+> construction. Revisit only for a task needing achromatic variation (grey /
+> white / black), which one hue axis genuinely cannot express.
+
+#### 5.2.3 `style` — the invariance targets
+
+Same treatment as everything else — drawn from the same *N(0, I)*, squashed by the
+same φ, written by the same writer, recorded in the same array — with ρ = 0 within
+the pair. None of these write paths is verified either; they are the larger half of
+what the §7.5 attribute spike is for.
+
+| Role | Factor | Write path | Notes |
+|---|---|---|---|
+| `light.intensity` | Dome / key light brightness | USD light attribute | The range must keep the image out of clipping at both ends: a blown-out or black frame destroys injectivity for *every* dimension at once, not just this one. |
+| `light.warmth` | Light colour temperature | USD light attribute | Kept on a 1-D warmth axis, for the same reason `cube.hue` is 1-D. |
+| `light.azimuth`, `light.elevation` | Key-light direction — "lighting jitter" | light prim transform | Shadow direction is the most visually salient style cue, and therefore the strongest test of invariance. |
+| `cam.jitter.*` | Per-capture camera pose jitter about the nominal view | `set_world_poses_from_view`, **per capture** | Spike 1 aimed the camera once, at boot. Per-sample re-aiming is a different usage pattern and gets its own check. Radius stays small enough that §5.3's occlusion geometry is not substantially changed. |
+| `table.roughness`, `table.albedo` | Table material | USD material attribute | Continuous, so they squash cleanly. |
+| `exposure` | Post-process exposure | carb / post-process setting, **if one exists** | Locating the lever is itself a spike question. |
+
+> ### ⚠ Categorical style factors do not fit inside *z*
+>
+> "Swap the room USD", "pick one of eight table materials" and "choose a distractor
+> object" are all natural style variations and **none of them is a monotone squash
+> of a Gaussian**. Forcing a categorical choice through `tanh` produces a latent
+> whose marginal is not the one Theorem 2 requires — the same mistake as clipping
+> (§5.1) wearing a different hat.
+>
+> Two honest options, and only these: keep the factor **continuous** (roughness,
+> albedo, intensity, hue — which is why the table above is entirely continuous), or
+> run the categorical variation as a **separate ablation across datasets**, one
+> dataset per room, compared afterwards, rather than as a dimension inside *z*.
+> Scene v2's room shell (§9, Phase 9) is where this first bites.
+
+> ### Deliberately *not* a latent: sensor noise
+>
+> Renderer-native noise is the thing §7.1 spends its whole length disabling. If
+> synthetic sensor noise is ever wanted as a robustness factor, it is a
+> `generate.py`-side post-process applied to an already-deterministic frame, with
+> its own recorded seed — never a render setting and never a `style` handle,
+> because it would reintroduce exactly the stochastic *g* the determinism gate
+> exists to rule out.
 
 ### 5.3 The occlusion problem
 
@@ -345,16 +459,61 @@ Mitigations, in order of preference:
 
 1. **Multi-view observation.** Render 2–3 cameras at well-separated viewpoints and concatenate (or stack as channels). Occlusion from all views simultaneously is rare. This is the cleanest fix and costs proportionally more render time.
 2. **Camera placement.** A high, oblique, near-top-down view makes arm-over-cube occlusion much less frequent than an eye-level view. Cheap and worth doing regardless.
-3. **Spatial separation in Stage 1.** Restrict the cube's squashed region to a table area the arm rarely sweeps over. Scientifically a bit of a dodge, but useful as a control condition to isolate occlusion as the cause of any measured gap.
+3. **Spatial separation in `base`.** Restrict the cube's squashed region to a table area the arm rarely sweeps over. Scientifically a bit of a dodge, but useful as a control condition to isolate occlusion as the cause of any measured gap.
 4. **Measure it.** Render a segmentation pass alongside RGB, compute the fraction of cube pixels visible, and log it per sample. Identifiability can then be reported conditioned on visibility — which turns a confound into a finding.
 
 Default configuration: (1) + (2), with (4) always on, because per-sample visibility is cheap to record and enormously clarifying when a number comes out low.
 
-### 5.4 Isotropy of the transition
+### 5.4 Isotropy of the transition — and why `style` is allowed to break it
 
 Appendix F of the paper makes a point that is easy to miss and expensive to get wrong: **the simultaneous (non-sequential) optimisation used by LeJEPA requires isotropic transitions**. If different latent dimensions have different autocorrelations ρ_α, the eigenvalue ordering interleaves, and the encoder recovers the *second* Hermite component of a slow latent instead of the first component of a fast one. Their formal condition is max_α K_α < 2 min_β K_β.
 
-Because we sample *z* directly rather than rolling out a policy, this is trivially satisfiable: **use one scalar ρ for all dimensions**. Resist any temptation to give the cube a different correlation from the arm. Conversely, an *anisotropic* ρ sweep is a cheap and valuable ablation — it should reproduce the eigenvalue-interleaving failure and would be a genuine contribution beyond the paper's own experiments.
+Because we sample *z* directly rather than rolling out a policy, this is trivially satisfiable: **one scalar ρ_task across every dimension we intend to identify**. Resist any temptation to give the cube a different correlation from the arm.
+
+#### 5.4.1 Setting ρ_style = 0 violates that inequality — in the benign direction
+
+The `style` group of §5.2 is anisotropic by construction: ρ = 0 where the rest of
+the vector has ρ_task. Writing ρ_α = e^(−K_α), ρ = 0 is K = ∞, so
+`max_α K_α < 2 min_β K_β` fails outright. That deserves stating plainly rather than
+glossed over, so: here is why it fails harmlessly, and what would falsify the claim.
+
+The transition operator's eigenvalues are ρ_α^k for Hermite degree *k* in dimension
+α. Interleaving — the failure App. F names — is the case where a slow dimension's
+*degree-2* eigenvalue outranks a fast dimension's *degree-1* one, i.e.
+ρ_slow² > ρ_fast, which is exactly what the inequality rules out. Ranking the
+spectrum for our case, with n_task dimensions at ρ_task = 0.95 and the style
+dimensions at 0:
+
+```
+ρ_task   = 0.95     <- n_task eigenfunctions, degree 1   the identification target
+ρ_task²  = 0.9025   <- n_task eigenfunctions, degree 2
+  …
+ρ_style  = 0        <- every style eigenfunction, at every degree
+```
+
+A dimension made *maximally* fast does not interleave into the top of the spectrum
+— it drops to the bottom of it. With *m = n_task*, the top-*m* eigenfunctions are
+exactly the task dimensions' first Hermite components, which is the conclusion
+Theorem 1 wants. **The style group is excluded from what the encoder recovers, and
+that exclusion *is* the invariance.** Isotropy is required among the dimensions you
+intend to identify; §5.2's groups are what make that set explicit instead of
+implicit.
+
+This is our reading of App. F applied to a case the paper does not discuss, so it is
+a **prediction, not a citation**, and the experiment measures it directly:
+`R²(h → z_task)` high *and* `R²(h → z_style) ≈ 0` in the same run (§10.2). If style
+latents turn out to be linearly decodable from *h*, this analysis is wrong and the
+group split needs rethinking, not patching.
+
+**It also sharpens the anisotropic-ρ ablation into a falsifiable prediction.** Sweep
+ρ_style from 0 up towards ρ_task and the ordering above has a crossing at
+**ρ_style = ρ_task²**: below it, task degree-2 outranks style degree-1 and the style
+dimensions stay out of the top of the spectrum; above it, style degree-1 climbs past
+the task harmonics and starts competing for capacity in the *m > n_task* regime the
+paper leaves open (§2). A measured transition at ρ_task² would directly confirm
+App. F's mechanism; no transition would be evidence against it. That is a better
+ablation than "sweep ρ anisotropically and see", because it predicts a *location*.
+
 
 ### 5.5 Validity policy for teleported states
 
@@ -374,43 +533,56 @@ Three options, and the first is recommended:
 
 ### 6.1 The sampler
 
-Direct transcription of Eq. (1) of the paper. Trivial code, but note the batching and the single shared ρ.
+Direct transcription of Eq. (1) of the paper. The one addition since §5.2's groups
+is that ρ may now be a **vector**, so `style` dims can carry ρ = 0 while everything
+else carries ρ_task. The maths is unchanged — the update is already elementwise, so
+a per-dimension ρ needs broadcasting and validation, nothing more.
 
 ```python
-# src/idtb/latents/ou.py  (shipped)
+# src/idtb/latents/ou.py  (shipped; `rho` gains tensor support -- §5.2)
 def sample_ou_pairs(n, batch, rho, *, device="cpu", dtype=torch.float32, generator=None):
     """z ~ N(0, I_n);  z' = rho*z + sqrt(1-rho^2)*eta,  eta ~ N(0, I_n).
 
-    Single scalar rho across all dims -> isotropic transition, required
-    for simultaneous (parallel) identifiability. See paper App. F.
+    `rho` is a scalar for a single-group run, or a length-n tensor built by
+    `LatentSpec.rho_vector(rho_task)` -- rho_task on base/full dims, 0.0 on
+    style dims. Isotropy is required *within* the identification target; §5.4.1
+    is why zeroing the style dims is the benign direction to break it.
     """
-    if not 0.0 <= rho <= 1.0:
-        raise ValueError(f"rho must lie in [0, 1], got {rho!r}")
+    rho = torch.as_tensor(rho, dtype=dtype, device=device)      # scalar or [n]
+    if not ((rho >= 0.0) & (rho <= 1.0)).all():
+        raise ValueError(f"every rho must lie in [0, 1], got {rho!r}")
     kwargs = {"device": device, "dtype": dtype, "generator": generator}
     z = torch.randn(batch, n, **kwargs)
     eta = torch.randn(batch, n, **kwargs)
     return z, rho * z + (1.0 - rho**2) ** 0.5 * eta
 ```
 
-Sanity assertions kept in the test suite: `Cov(z) ≈ I`, `Cov(z′) ≈ I`, `Cov(z, z′) ≈ ρI`, and marginal normality per dimension. If any fails, the entire downstream analysis is meaningless.
+Sanity assertions kept in the test suite: `Cov(z) ≈ I`, `Cov(z′) ≈ I`,
+`Cov(z, z′) ≈ diag(ρ)`, and marginal normality per dimension. The group structure
+shows up in the third one as an exactly **block** cross-covariance — ρ_task on the
+task block, **zero on the style block** — which is the cheapest possible check that
+ρ = 0 is reaching the dimensions it was meant to reach and no others. If any of
+these fails, the entire downstream analysis is meaningless.
+
 
 ### 6.2 Latent specification and squash
 
 ```python
-# src/idtb/latents/spec.py  (shipped)
+# src/idtb/latents/spec.py  (shipped; `group` and the group views are §5.2's addition)
 @dataclass(frozen=True)
 class Handle:
-    role: str          # backend-independent: "arm.j0", "cube.x"
+    role: str            # backend-independent: "arm.j0", "cube.x", "light.intensity"
     center: float
-    radius: float      # tanh amplitude
-    # Handle.from_limits(role, lo, hi, fraction) builds these from *measured*
-    # limits, so no radius is ever an absolute number baked into code.
+    radius: float        # tanh amplitude
+    group: str = "base"  # the *narrowest* group it belongs to: base | full | style
+    # Handle.from_limits(role, lo, hi, fraction, group=...) builds center/radius
+    # from *measured* limits, so no radius is ever an absolute number in code.
 
 @dataclass(frozen=True)
 class LatentSpec:
     """Registry mapping latent dims -> physical handles.
     Adding an object == appending handles. n grows, nothing else changes."""
-    handles: tuple[Handle, ...]
+    handles: tuple[Handle, ...]   # ordered base, then full, then style (§5.2)
 
     def squash(self, z):                 # phi: R^n -> physical values
         center, radius = self._params(z)
@@ -419,37 +591,69 @@ class LatentSpec:
     def saturated(self, phi, *, atol):   # float32 injectivity diagnostic, §5.1
         center, radius = self._params(phi)
         return radius - (phi - center).abs() < atol
+
+    def dims(self, group):               # cumulative: dims("full") includes base
+    def subset(self, group):             # a narrower spec, same dimension ordering
+    def rho_vector(self, rho_task, *, rho_style=0.0):   # [n], feeds sample_ou_pairs
 ```
 
 Handles carry **roles**, not joint names and never indices. The backend owns the role → target mapping — the Isaac backend resolves `arm.j0` to a joint index once at bind time via `robot.find_joints(...)`, the mock to a sprite parameter. A spec keyed on `panda_joint1` could not be shared with the mock, which has no Franka, and the tier-1 contract suite (§10.3) exists precisely to run one set of tests against both. Hardcoded indices are a silent-corruption hazard: they change with asset revisions.
+
+**Groups are a property of the handle, not of the run.** One spec declares every
+knob a scene has; a run activates `base` or `full` and switches `style` on or off.
+That keeps the registry the single place a scene's knobs are described, and makes
+§9's group sweep a config change rather than four specs to keep in sync. The
+ordering contract — base handles first, then `full`-tagged, then `style` — is
+enforced in `__post_init__`, because it is what makes `dims("base")` a prefix of
+`dims("full")` and lets a latent index mean the same thing across configurations.
+
+`rho_style` is a parameter defaulting to `0.0`, not a hardcoded zero: §5.4.1's
+crossing prediction at ρ_style = ρ_task² can only be tested by sweeping it.
+
 
 ### 6.3 State writer
 
 Sketch, structured to match §4.5. Two points of care: root poses are in **world** frame so the environment origin must be added, and the root pose is a 7-vector whose orientation is a **normalised (w, x, y, z) quaternion** — not something to leave uninitialised while writing only x and y.
 
+**The writer dispatches by write path, not by group.** §5.2's three groups are a
+*sampling and reporting* split; what the writer cares about is that `arm.*` and
+`gripper.*` go through `write_joint_state_to_sim`, `cube.x`/`cube.y` through the
+root-state write, and `cube.size`, `cube.hue` and every `light.*`, `table.*`,
+`cam.*` through USD attribute writes that **Spikes 1–2 verified nothing about**
+(§7.2's scope note). Those three paths have different failure modes and each needs
+its own read-back, so the dispatch stays explicit rather than one indexed
+assignment over `phi_vals`.
+
 ```python
-# src/idtb/sim/writer.py  (sketch — imports Isaac lazily, inside the function)
+# src/idtb/sim/writer.py  (sketch -- imports Isaac lazily, inside the function)
 def write_latent_state(scene, bound_spec, phi_vals):
     """Teleport the scene to the physical state encoded by phi_vals.
     phi_vals: [B, n] already squashed. No physics stepping."""
     robot = scene["robot"]
     cube  = scene["cube"]
 
-    # --- arm joints (indices resolved at bind time from names) ---------
+    # --- path 1: arm joints (indices resolved at bind time from names) -
     joint_pos = robot.data.default_joint_pos.clone()
     joint_pos[:, bound_spec.joint_cols] = phi_vals[:, bound_spec.joint_dims]
     robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos))
 
-    # --- cube root pose, world frame, normalised wxyz quaternion -------
+    # --- path 2: cube root pose, world frame, normalised wxyz quaternion
     root = cube.data.default_root_state.clone()          # [B, 13]
     root[:, bound_spec.cube_cols] = phi_vals[:, bound_spec.cube_dims]
+    root[:, 2] = table_h + 0.5 * edge_len(phi_vals)      # derived, not a latent -- §5.2.1
     root[:, 0:3] += scene.env_origins                    # local -> world
     cube.write_root_pose_to_sim(root[:, :7])             # quat already set
     cube.write_root_velocity_to_sim(torch.zeros_like(root[:, 7:]))
 
+    # --- path 3: attributes -- size, colour, lights, camera, materials -
+    # UNVERIFIED as of Spike 1/2. See §7.5 before treating any of these as
+    # a first-class latent; read-back is per-attribute, not one assertion.
+    write_attributes(scene, bound_spec, phi_vals)
+
     # --- flush; do NOT call scene.reset(), which restores defaults -----
     scene.write_data_to_sim()
 ```
+
 
 > ### ⚠ Silent write failures are the real API risk
 >
@@ -462,27 +666,46 @@ def write_latent_state(scene, bound_spec, phi_vals):
 ### 6.4 Generation loop
 
 ```python
-# src/idtb/gen/generate.py  (sketch — backend is a SceneBackend, real or mock)
+# src/idtb/gen/generate.py  (sketch -- backend is a SceneBackend, real or mock)
+spec    = full_spec.subset(active_group)                   # "base" or "full"
+rho_vec = spec.rho_vector(rho_task, rho_style=rho_style)   # 0.0 on style dims, §5.2
+
 for shard in range(n_shards):
-    z, z_next = sample_ou_pairs(spec.n, batch, rho, generator=g)
+    z, z_next = sample_ou_pairs(spec.n, batch, rho_vec, generator=g)
 
     backend.write_state(spec.squash(z))
-    x  = backend.render(sample_idx=idx)
+    x  = backend.render(sample_idx=idx).clone()      # §7.2: the sensor buffer is aliased
     d1 = backend.diagnostics()
 
     backend.write_state(spec.squash(z_next))
-    x2 = backend.render(sample_idx=idx + 1)
+    x2 = backend.render(sample_idx=idx + 1).clone()
     d2 = backend.diagnostics()
 
     store(shard, x=x, x_next=x2, z=z, z_next=z_next,
+          roles=spec.roles, groups=spec.group_of_dim,   # analysis slices by group, §10.2
           visibility=(d1["visibility"], d2["visibility"]),
           collision=(d1["collision"], d2["collision"]),
-          rho=rho, seed=seed)
+          saturated=(spec.saturated(spec.squash(z), atol=tol), ...),
+          rho_task=rho_task, rho_style=rho_style, seed=seed)
 ```
+
+*z* is stored at full width, style dimensions included. They are excluded from the
+identification target, not from the record — an invariance claim you cannot regress
+against is not a measurement (§10.2). The per-dimension group tags travel with the
+shard so the analysis never has to reconstruct the split from role-name prefixes.
+
+> ### The invariance probe split
+>
+> For a small fraction of samples, store a **third** frame: the same *z*, with only
+> the style dimensions resampled. That triple `(x, x_style-resampled, z)` turns "the
+> encoder should be invariant" into a direct measurement — `‖h(x) − h(x_style)‖`
+> against the scale of *h* — without generating a second full dataset, and without
+> relying on `R²(h → z_style) ≈ 0` alone, which a degenerate encoder could satisfy
+> by collapsing. It costs one extra render on a subset, and it is the only thing the
+> group design adds to the dataset schema beyond the group tags themselves.
 
 Because the driver speaks only to `SceneBackend`, this entire loop is exercised locally against the mock before it ever runs on a GPU.
 
----
 
 ## 7. Rendering: Photorealism vs. Determinism
 
@@ -517,6 +740,8 @@ If this fails, nothing else in the project is worth running. The same test runs 
 
 ### 7.2 Phase-1 spikes — ✅ answered, `spikes/spike_api.py` against the real pod
 
+> **Scope: these four cover *physics-state writes only*.** Everything measured below moves through `write_joint_state_to_sim` or `write_root_state_to_sim` — joint angles and rigid-body pose, i.e. §5.2's `base` group. The `full` and `style` groups write through geometry, material, light, camera and post-process APIs that none of this touched. §7.5 is the spike that closes that gap; nothing here transfers to it by default.
+
 These four questions gated the render design and none of them were answerable from documentation; all four needed the GPU pod, and all four were run to a verdict on 2026-09-16 (four iterations — docs/PLAN.md Phase 3 has the blow-by-blow, including two defects the spike script itself had, found and fixed against the real API rather than assumed away).
 
 | # | Question | Answer |
@@ -549,12 +774,60 @@ A genuinely interesting experiment falls out of having more than one: **does lin
 
 ### 7.4 Scene and lighting setup
 
-- **Lighting:** HDRI dome plus one or two area lights. Fixed across the dataset — lighting variation is *not* a latent unless deliberately made one.
-- **Materials:** proper PBR (roughness, metallic, normal maps) on table, arm and cube. Flat diffuse materials would make the "photorealistic" claim indefensible.
-- **Camera:** fixed extrinsics and intrinsics, high oblique angle, 2–3 views per §5.3. Intrinsics logged to dataset metadata.
-- **Deliberate non-latents:** anything not in the latent vector must be held exactly constant, or it becomes uncontrolled nuisance variation the encoder must marginalise. Fix random seeds for any procedural material or placement.
+**Every source of variation falls in exactly one of three categories, and there is
+no fourth.** This replaces the older rule that anything outside the latent vector is
+held constant — §5.2's `style` group is precisely the case that rule had no room for.
 
----
+| Category | Treatment | Examples |
+|---|---|---|
+| **Identified** (`base`, `full`) | Sampled at ρ_task, recorded, expected to be linearly recoverable from *h*. | arm joints, gripper aperture, cube position / size / hue |
+| **Recorded nuisance** (`style`) | Sampled at ρ = 0, recorded in full, expected to be **un**recoverable from *h*. | lighting intensity / warmth / direction, camera jitter, table material, exposure |
+| **Held constant** | Fixed for the whole dataset and asserted so, with a fixed seed for anything procedural. | camera intrinsics, scene topology, physics parameters, render preset, arm and cube material *type* |
+
+An "uncontrolled nuisance" category does not exist here. A factor that varies
+without being recorded cannot be conditioned on, cannot be regressed against, and
+turns a null result into an unanswerable question — which is the whole reason
+`style` is sampled through the same machinery as everything else rather than
+jittered ad hoc inside the scene setup.
+
+- **Lighting:** HDRI dome plus one or two area lights. **Varies, as `style`** — intensity, warmth and direction are latent dimensions at ρ = 0 (§5.2.3), not fixed constants as an earlier draft of this section had it.
+- **Materials:** proper PBR (roughness, metallic, normal maps) on table, arm and cube. Flat diffuse materials would make the "photorealistic" claim indefensible. Table roughness and albedo vary as `style`; the arm's do not.
+- **Camera:** fixed intrinsics, high oblique angle, 2–3 views per §5.3. Intrinsics logged to dataset metadata and **held constant**; extrinsics carry a small `style` jitter about the nominal pose, bounded so §5.3's occlusion geometry is not substantially changed.
+- **Categorical factors stay out of *z*:** room swaps and discrete material choices are not squashable Gaussians (§5.2.3's box) and run as cross-dataset ablations instead.
+
+### 7.5 Spike 5 — the attribute write paths (`full` and `style`), open
+
+Spikes 1–4 cover one thing: **physics-state writes**. `write_joint_state_to_sim`
+and `write_root_state_to_sim` are verified to land, read back exactly and render
+deterministically. Every latent §5.2 adds beyond `base` moves through a *different*
+mechanism — a geometry write for `cube.size`, a USD material attribute for
+`cube.hue` and `table.*`, a light attribute for `light.*`, a per-capture camera
+re-aim for `cam.jitter.*`, a post-process setting for `exposure` — and **none of
+those has been touched**. `spikes/spike_dynamic_attrs.py` (docs/PLAN.md Phase 3)
+closes that gap before any of them is wired into `SceneBackend` as a first-class
+latent.
+
+Three questions per knob, and the order matters:
+
+1. **Does the write land?** Per-attribute read-back, the §6.3 gate extended to a
+   path where `robot.data.*` does not apply. A silently ignored material write is
+   the §6.3 failure mode with a different asset API in front of it.
+2. **Does varying it alone move pixels, far above the noise floor?** This ranks
+   *above* determinism for the same reason §7.2 gives: a knob that writes cleanly
+   and renders deterministically but changes nothing visible is a **dead
+   dimension**. For a `style` knob that is worse than useless — the encoder scores
+   perfect invariance for free, and the headline result is an artefact of a knob
+   nobody checked was connected.
+3. **Is it still bitwise deterministic under `standard`?** Per knob, varying only
+   that knob between captures. Spike 1's verdict was measured with only physics
+   state changing; a material or light write re-triggering shader compilation or
+   accumulation reset is a different question with the same acceptance test.
+
+Motion blur is expected to be a **clean, understood FAIL** rather than a bug to
+force past: blur implies motion over time and this pipeline has none by design
+(§5.5). Recording that reason is a completed check, in the same category as Spike
+1's aliasing FAIL.
+
 
 ## 8. Infrastructure
 
@@ -759,12 +1032,13 @@ Treat the GPU as a batch renderer, not a development environment. Per §1 this i
 | **0b** | Pure layers *(parallel, local, no GPU)* | OU sampler, `LatentSpec` + squash, package scaffolding, the §4.2 import guard, pod scripts, tier-0 tests green. **Blocked on nothing — done.** | 2 days |
 | **1** | Infrastructure + spikes | Vendor `isaac-lab` image pulled at the resolved tag; network volume mounted at `/idtb` with caches relocated onto it; `infra/bootstrap.sh` handling the image's uid-1000 user against a root-owned volume; repeatable pod launch. **Spikes 1–4 (§7.2) answered and recorded in §3.** | 2–3 days |
 | **2** | Scene v1 | `stage_v1_tabletop.usd`: table, Franka, cube, PBR materials, HDRI + area lights, camera rig (2–3 views). Debug-preset renders look right. | 1–2 days |
+| **2b** | Spike 5 — attribute writes | `spikes/spike_dynamic_attrs.py` (§7.5): does each `full`/`style` knob write, read back, move pixels, and stay bitwise deterministic under `standard`? Measured ranges for every new handle. Gates the group design before any of it reaches `SceneBackend`. | 1 day |
 | **3** | Backend seam + real backend | `SceneBackend` protocol and `MockSceneBackend`, designed against the spike's measurements rather than against documentation; then `IsaacSceneBackend`: handle resolution by name, state writer, read-back assertions confirming every write landed. Collision and visibility diagnostics. Tier-1 contract suite green against Isaac. | 2 days |
 | **4** | Determinism gate | Deterministic capture path; the §7.1 acceptance test passing for every preset intended for dataset use, called by `generate.py` itself and not only by the test suite. | 1–2 days |
 | **5** | OU generator | Sharded writer storing (x, x′, z, z′, visibility, collision, ρ, seed, intrinsics); per-shard checkpointing. | 2 days |
-| **6** | First dataset | ~100k pairs at `standard`, ρ = 0.95 (a starting point, not a finding). Visual audit of a random sample grid. | 0.5–1 day compute |
+| **6** | First dataset | ~100k pairs at `standard`, ρ_task = 0.95 (a starting point, not a finding), **`base` group only, no style variation** — the clean control every later configuration is compared against. Visual audit of a random sample grid. | 0.5–1 day compute |
 | **7** | Analysis | LeJEPA/SIGReg training; metrics: R²(h→z), R²(z→h), ‖Q̂ᵀQ̂−I‖_F/√n, ε, δ, bound D + (ε+D)². **First real number.** | 2–3 days |
-| **8** | Sweeps | ρ ∈ {0.3 … 0.99}; λ grid; render-realism ablation; gennorm α latent-distribution sweep (converse test); anisotropic-ρ ablation; resolution ablation. | 3–5 days + compute |
+| **8** | Sweeps | **The group matrix first** — `base+style`, `full`, `full+style` against Phase 6's `base` control, which is what separates "identifiability got harder because *n* grew" from "because style varies"; each is one generation run. Then ρ ∈ {0.3 … 0.99}; λ grid; render-realism ablation; gennorm α latent-distribution sweep (converse test); **ρ_style sweep testing §5.4.1's predicted crossing at ρ_task²**; resolution ablation. | 3–5 days + compute |
 | **9** | Scene v2 (room) | USD reference of a room shell around stage v1; relight; re-validate determinism and occlusion statistics; regenerate and re-measure. | 4–6 days |
 | **10** | Scene v3 (objects) | Add manipulands one at a time; each adds 2–3 latent dims. Study identifiability vs. *n*, and the *m ≠ n* regime the paper leaves open. | ongoing |
 
@@ -788,6 +1062,8 @@ Each must pass before the next phase is trusted:
 - **Writer:** state read back from the sim matches what was written, to solver tolerance, for every handle. Non-negotiable — see the §6.3 warning.
 - **Renderer:** order-independence test of §7.1 passes.
 - **Injectivity proxy:** nearest-neighbour check — the fraction of image pairs whose pixel distance is near zero while their latent distance is large should be negligible. A non-trivial fraction means *g* is not injective and there is an occlusion or symmetry problem to fix *before* blaming the encoder.
+- **Style sensitivity:** varying a `style` dimension alone must move pixels far above the render noise floor, per knob (§7.5). A style knob that is silently disconnected hands the encoder perfect invariance for free, and the headline invariance result is then an artefact of an unchecked write. This gate is why §7.5 ranks sensitivity above determinism.
+- **Group wiring:** `Cov(z, z′)` measured on real generated shards must be ρ_task on the task block and **exactly zero** on the style block. Cheap, and the only direct evidence that ρ = 0 reached the dimensions it was meant to.
 - **Trivial-baseline check:** a linear probe from raw pixels to *z* should score poorly (confirming the mixing is genuinely nonlinear, analogous to the paper's *R²*(x→z) ≈ 0.73–0.78 column). If raw pixels already predict *z* linearly, the task is too easy to be informative.
 
 ### 10.2 Scientific measurements
@@ -798,6 +1074,8 @@ Mirror the paper's metric set so results are directly comparable to their Tables
 - Per-dimension *R²*, to expose anisotropy (their Reacher shoulder-vs-wrist asymmetry).
 - Orthogonality error ‖Q̂ᵀQ̂ − I‖_F/√n.
 - Approximate-bound verification: compute ε, δ, D = δ/(2ρ(1−ρ)), and check the measured recovery error falls below D + (ε+D)².
+- **Per-group *R²*.** `R²(h → z_base)` and `R²(h → z_full)` are the identifiability claim; **`R²(h → z_style)` is the invariance claim and should be ≈ 0**. Same probe machinery, sliced by the group tags stored with each shard (§6.4).
+- **Direct invariance distance**, from §6.4's probe split: `‖h(x) − h(x_style-resampled)‖` against the scale of *h*, for pairs sharing an identical *z*. This is what a low `R²(h → z_style)` cannot distinguish from a collapsed encoder, so both are reported.
 - Identifiability conditioned on cube visibility — unique to this setup and probably the most interesting number the project will produce.
 
 ### 10.3 Test tiers
@@ -829,7 +1107,11 @@ Mechanics:
 | Provisioned a GPU without RT cores | Critical | Hard rule: RT-core GPUs only; `infra/preflight.sh` hard-fails one. **Closed for the current pod** — RTX 4090, CC 8.9 (§8.1). Re-opens on any re-provisioning. |
 | No local runtime → slow, blind iteration on Isaac code | High | `MockSceneBackend` and the tier-0/tier-1 split (§4.3, §10.3); Phase 0b runs in parallel with Phase 0. |
 | Occlusion makes g non-injective; results look like encoder failure | High | Multi-view cameras, high oblique placement, per-sample visibility logging, injectivity proxy check. |
-| Cube rotational symmetry hides a latent dimension | High | Omit yaw in Stage 1; switch to a visually asymmetric object before introducing orientation latents. |
+| Cube rotational symmetry hides a latent dimension | High | Omit yaw from `base`; switch to a visually asymmetric object before introducing orientation latents (§5.2.1). |
+| A `style` knob is silently disconnected, so invariance is measured for free | High | **New with the group design.** A write that lands but changes no pixels is indistinguishable from a perfectly invariant encoder in every downstream metric. Mitigated by §7.5's per-knob sensitivity check, ranked above determinism, and by §10.1's style-sensitivity gate running on generated data, not only in the spike. |
+| `full`/`style` attribute write paths behave unlike the physics-state writes Spikes 1–2 verified | High | Spike 5 (§7.5) before any of them becomes a first-class latent; per-attribute read-back in `writer.py`, since `robot.data.*` does not cover a material or light write. Motion blur is expected to FAIL cleanly and be recorded as such. |
+| ρ_style = 0 breaks App. F's isotropy condition | Medium | §5.4.1 argues the break is in the benign direction — an infinitely fast dimension leaves the top of the spectrum rather than interleaving into it — but that is *our* reading, not the paper's. Treated as a falsifiable prediction: `R²(h → z_style) ≈ 0` is measured in every run, and the ρ_style sweep (§9 Phase 8) tests the predicted crossing at ρ_task². If style latents prove linearly decodable, the group split is wrong and gets rethought, not patched. |
+| `cube.size` confounds with camera distance under a single view | Medium | A larger cube further away renders near-identically to a smaller one nearer — non-injectivity of the same kind as §5.3's occlusion, introduced by the `full` group. Mitigated by the 2–3 cameras §5.3 already prescribes, and by keeping the size radius small relative to the depth range; the injectivity proxy in §10.1 is what would catch it. |
 | Bounded joints break Gaussianity of z | High | Absorbed tanh squash (§5.1). Never clip, never wrap. |
 | Driver / Isaac Sim release mismatch | Medium | Resolved to Isaac Sim 6.0.1, on a host below its tested driver, accepted knowingly (§3.4.1) rather than re-provisioned for — two prior attempts to select hosts by driver both failed to land the target branch. Residual: the gap is real (570.195.03 vs. tested 595.58.03) and `preflight.sh` fails on it by default rather than hiding it; the actual check is the §7.2 spike measuring the renderer directly, not the driver number as a proxy for it. |
 | Isaac Lab 3.0 beta introduces breaking changes before 3.0 stable | Medium | Accepted knowingly (§3.4). Exposure is bounded by a deliberately small Isaac Lab surface behind the §4.3 seam, with the tier-1 contract suite defining what a migration has to keep working. Pin the tag; do not track `develop`. |
@@ -859,6 +1141,8 @@ Two tracks, and they are independent.
 9. Only then start on `stage_v1_tabletop.usd`.
 
 **Track B — build what needs no decisions (local, start now):**
+
+0. **Group support in the pure layer** — `Handle.group`, `LatentSpec.dims/subset/rho_vector/group_of_dim` with the base→full→style ordering contract, and a vector-ρ `sample_ou_pairs`. None of it depends on a measurement: the *structure* is decided (§5.2), only the radii and the membership of individual knobs wait on Spike 5. Tier-0 tests: cumulative group membership, `dims("base")` is a prefix of `dims("full")`, ordering violations rejected, block cross-covariance with zero on the style block.
 
 1. ~~OU sampler, `LatentSpec`, squash — with tier-0 tests.~~ **Done.** Plus the package scaffolding, the §4.2 import guard as an executable test, and the two pod scripts Track A needs.
 2. ~~`spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast.~~ **Written, unrun.** Its detectors are pure and covered by `tests/test_spike_api.py`, which is mostly negative controls — a stale renderer, an aliased buffer, a temporal leak — so the verdict it eventually returns comes from detectors that have been watched detecting (§10.1). Run by Track A.

@@ -8,7 +8,17 @@ Starting point: the repo had **no source code** — only README.md, LICENSE, and
 
 Every Isaac API signature in README §4.4 came from reading docs, **never from running anything**. So: meet the Isaac API first in one spike script, then design the protocol against verified reality. The README's current order (protocol + mock first, Isaac at Phase 3) would mean designing the central abstraction against guesses.
 
-**Scope:** stops at "Isaac API verified on the pod + pure layers green locally + protocol and mock built." ~3–4 days.
+**Scope:** stops at "Isaac API verified on the pod + pure layers green locally + protocol and mock built." ~3–4 days, now ~5 with the latent-group work below.
+
+**Amended 2026-09-17 — three latent groups.** The latent set was a single flat
+vector of 7 handles. README §5.2 now splits every simulator knob into `base`
+(what single-cube pick-and-place needs), `full` (⊇ `base`, every task-related
+factor — cube size, cube colour), and `style` (what the task must never depend on
+— lighting, camera jitter, table material), with `style` resampled *within* each
+pair at ρ = 0 so the encoder is pushed to be invariant to it. Two consequences for
+this milestone, both below: the pure layer needs group support (**Phase 3a**,
+local, no GPU, no blockers), and every `full`/`style` knob writes through an API
+that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 
 **Constraint:** dev machine is macOS. Isaac doesn't run on macOS at all. All Isaac-facing code is written blind; **everything touching a GPU runs on the pod.**
 
@@ -156,26 +166,7 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 - [x] 🧑 **Run it, paste the whole table.** Done — see the four run entries above; it took exactly the expected 2–4 iterations.
 - [x] 🤖 **Fix and re-run** until every check has a verdict. Done — 12/13 PASS, the one FAIL (`buffers_aliased`) is understood and permanent, same standard as "TiledCamera black under RealTimePathTracing, matches #367, use `Camera`" would have been.
-- [ ] 🤖 **Write `spikes/spike_dynamic_attrs.py` — Spike 1/2's follow-up, for everything outside physics-state writes.** Spike 1 proved `standard` (§7.3) is bitwise-deterministic and Spike 2 proved read-back is exact — but only for what changes between captures via `write_joint_state_to_sim`/`write_root_state_to_sim`: joint angles and rigid-body pose. Extending the latent set to cube **size** (a scale/geometry write) or **color** (a material-attribute write), or to any style/nuisance latent (lighting, per-sample camera jitter, exposure, table/background material, roughness, sensor noise, motion blur), uses a write path none of that proved anything about. This spike closes that gap before any of it gets wired into `SceneBackend` (Phase 4) as a first-class latent.
-
-  Reuses `spikes/spike_api.py`'s pure layer directly — `determinism_report`, `Report`, the uint8-safe diffs — rather than duplicating them; only the Isaac-layer rig needs to be new, and it can be smaller (no Franka needed: the open questions are all about the cube, the light, and the camera, so a minimal cube + light + camera scene boots faster and doesn't re-touch the already-solved Franka-asset problem).
-
-  Three structural rules, adapted from Spike 1:
-  1. **Never fail fast**, same as `spike_api.py` — one PASS/FAIL table, one `facts.json`, every check isolated.
-  2. **One write path per check.** A failure writing cube color must not block finding out whether writing light intensity works — the whole point is isolating which of these mechanisms exist and which don't.
-  3. **Resolve, don't guess.** Where the exact API call for an attribute (scale, material color, light intensity, exposure) isn't known, try candidates and record which one answered — `spike_api.py`'s `resolve()` pattern for `FRANKA_PANDA_CFG`, not a single guess that crashes the boot.
-
-  | Check | What it answers |
-  |---|---|
-  | Cube scale write + read-back | Is a size latent writable per-sample at all, and does the collision volume follow the visual scale |
-  | Determinism under `standard`, varying only scale between captures | Does this write path preserve the bitwise reproducibility Spike 1 measured, or does it leak/corrupt like the default render mode did |
-  | Cube material color write + read-back | Is a color latent writable per-sample via the USD material API |
-  | Determinism under `standard`, varying only material color | Same question, for the material write path |
-  | Light attribute write (intensity / color temperature) + determinism | The first nuisance-latent write path, and whether it's compatible with `standard` |
-  | Camera re-aimed *every capture*, not just once at boot, + determinism | `set_world_poses_from_view` was only ever called once in Spike 1; per-sample jitter is a different usage pattern |
-  | Exposure: does a carb/post-process setting exist and accept a value | Locates the actual lever for an "exposure" nuisance latent, if there is one |
-  | Motion blur under the teleport-no-step model | **Expected candidate for an understood FAIL, not a bug to force past.** Blur implies motion over time; this pipeline has none by design (§5.5). A clean FAIL here, with the reason recorded, is a completed check — same philosophy as Spike 1's aliasing FAIL. |
-  | Sensor noise injection point | Spike 1 already ruled out renderer-native noise (determinism requires disabling it) — this just confirms synthetic noise, if wanted, is a `generate.py`-side concern, not a render-settings one |
+- [ ] 🤖 **Write `spikes/spike_dynamic_attrs.py`** — promoted out of this phase into its own **Phase 3b** below, because README §5.2's three latent groups turned it from "one follow-up spike" into the gate on the whole `full`/`style` design.
 
 - [ ] 🧑 **Save a few rendered arrays + their generating state, pull them down** — so the mock is built to real conventions, not assumed ones. Still open — `spike_api.py` doesn't currently save frames to disk, only stats to `facts.json`.
 - [x] 🤖 **README checkpoint 2** — §7.2 rewritten with all four Spike answers; §7.3 `standard` preset now a real measured carb config (`PathTracing`, `spp=1`, `totalSpp=64`, denoiser off); §5.5 confirmed (zero `sim.step()`, measured, not assumed); §5.2 joint limits promoted from provisional to measured for the four active arm joints + gripper (cube position stays provisional — no table in the spike scene); §3.1/§3.2 Decision Register updated (four Spike questions moved from deferred to decided, plus the unplanned camera-aliasing finding added); §11 Risk Register rows closed/updated to match.
@@ -183,19 +174,96 @@ Every Isaac API signature in README §4.4 came from reading docs, **never from r
 
 ---
 
+## Phase 3a — Latent groups in the pure layer (local, no GPU, no blockers)
+
+> Everything here is decided structure (README §5.2, §5.4.1, §6.1–6.2). Only the
+> *radii* and the group membership of individual knobs wait on Phase 3b, and those
+> are data, not code. This is Track B work: it can land before the pod is next up.
+
+- [ ] 🤖 **`Handle.group`** — a fourth field, `"base" | "full" | "style"`, defaulting to `"base"` so every existing call site and test keeps working unchanged. `from_limits` grows a `group=` keyword. Reject any other value at construction; three groups is the decision (README §3.1), not a placeholder for an open vocabulary.
+- [ ] 🤖 **Ordering contract in `LatentSpec.__post_init__`** — handles must appear `base`, then `full`, then `style`. Enforced, not documented: it is what makes `dims("base")` a *prefix* of `dims("full")`, which in turn is what lets latent index *i* mean the same physical thing in a `base` run and a `full` run. A spec that interleaves them raises.
+- [ ] 🤖 **Group views on `LatentSpec`**
+  - `dims(group) -> tuple[int, ...]` — **cumulative**: `dims("full")` returns base *and* full-tagged dims; `dims("style")` returns only style dims (disjoint).
+  - `subset(group) -> LatentSpec` — a narrower spec preserving dimension order.
+  - `group_of_dim -> tuple[str, ...]` — per-dimension tags, stored with every shard (README §6.4) so the analysis slices by tag instead of re-deriving the split from role-name prefixes.
+  - `rho_vector(rho_task, *, rho_style=0.0) -> Tensor[n]` — `rho_task` on base/full dims, `rho_style` on style dims. A *parameter*, not a hardcoded zero: §5.4.1 predicts a spectrum crossing at ρ_style = ρ_task² that only a sweep can test.
+- [ ] 🤖 **Vector ρ in `sample_ou_pairs`** — accept a scalar *or* a length-*n* tensor. The update `z' = ρz + √(1−ρ²)η` is already elementwise, so this is broadcasting plus validation; the scalar path must stay bitwise identical to today's.
+- [ ] 🤖 **Tier-0 tests**, in the same change:
+  - cumulative membership (`dims("full")` ⊇ `dims("base")`), and `dims("base")` is a *prefix*
+  - an out-of-order spec raises; an unknown group name raises
+  - `subset("base").squash(z)` agrees element-for-element with the full spec's squash on those dims
+  - **block cross-covariance**: with a mixed spec and `rho_vector(0.95)`, `Cov(z, z′)` measures 0.95·I on the task block and **exactly 0** on the style block (this is README §10.1's group-wiring gate, and it is the only direct evidence ρ = 0 reached the dimensions it was meant to)
+  - scalar-ρ regression: same seed, scalar `0.95` vs. a constant vector `0.95` → bitwise equal
+  - ρ vector of the wrong length, and any element outside [0, 1], both rejected
+
+**Done when:** `pytest` green, and a mixed `base`/`full`/`style` spec round-trips through sample → squash → group-slice with the style block measurably decorrelated.
+
+---
+
+## Phase 3b — Spike 5: the attribute write paths (`full` + `style`)
+
+> **This is the gate on the entire group design.** Spikes 1–4 measured
+> `write_joint_state_to_sim` and `write_root_state_to_sim` — §5.2's `base` group and
+> nothing else. `cube.size` is a geometry write, `cube.hue` and `table.*` are material
+> writes, `light.*` is a light-attribute write, `cam.jitter.*` is a per-capture camera
+> re-aim, `exposure` is a post-process setting. **None of these has been touched**, and
+> none of Spike 1's verdicts transfers to them by default.
+
+- [ ] 🤖 **Write `spikes/spike_dynamic_attrs.py`.** Reuses `spikes/spike_api.py`'s pure layer directly — `determinism_report`, `sensitivity_report`, `Report`, the uint8-safe diffs — rather than duplicating it. Only the Isaac-layer rig is new, and it can be *smaller*: no Franka is needed, since every open question is about the cube, the lights, the table and the camera, so a minimal cube + light + camera scene boots faster and does not re-touch the already-solved Franka-asset problem.
+
+  Three structural rules, adapted from Spike 1:
+  1. **Never fail fast** — one PASS/FAIL table, one `facts.json`, every check isolated. `SimulationApp` is one-shot per process and boot is slow.
+  2. **One write path per check.** A failure writing cube colour must not block finding out whether writing light intensity works — isolating *which mechanisms exist* is the whole point.
+  3. **Resolve, don't guess.** Where the exact call for an attribute (scale, material colour, light intensity, exposure) is unknown, try candidates and record which answered — `spike_api.py`'s `resolve()` pattern, not a single guess that kills the boot.
+
+  **Three questions per knob, and the order matters.** Sensitivity ranks above determinism, for a reason specific to the `style` group:
+
+  | Order | Question | Why it ranks there |
+  |---|---|---|
+  | 1 | **Does the write land?** Per-attribute read-back. | The §6.3 silent-write-failure gate, on a path where `robot.data.*` does not apply. A material write that is silently ignored looks exactly like a working one. |
+  | 2 | **Does varying it alone move pixels, ≫ the noise floor?** | A knob that writes cleanly and renders deterministically but changes *nothing visible* is a dead dimension. For a `style` knob that is worse than useless: the encoder scores perfect invariance for free and the headline result is an artefact of an unchecked write. |
+  | 3 | **Still bitwise deterministic under `standard`?** Varying only that knob between captures. | Spike 1's verdict was measured with only physics state changing. A material or light write that re-triggers shader compilation or resets accumulation is a different question with the same acceptance test. |
+
+  | Check | Group | What it answers |
+  |---|---|---|
+  | Cube scale write + read-back; does the collision volume follow the visual scale | `full` | Is `cube.size` writable per-sample at all |
+  | Cube scale **sensitivity** and **determinism** under `standard` | `full` | Does the geometry path preserve Spike 1's bitwise result |
+  | **Measured** size range the gripper can actually close on | `full` | `cube.size`'s radius, from the measured `[0.0, 0.04]` m finger aperture — not a guessed constant (README §5.2.2) |
+  | Cube material colour write + read-back, at fixed saturation/value | `full` | Is `cube.hue` writable via the USD material API |
+  | Cube hue **sensitivity** and **determinism** under `standard` | `full` | Same, for the material path |
+  | Light intensity / warmth write + read-back + sensitivity + determinism | `style` | The first nuisance write path, and whether it is compatible with `standard` |
+  | **Measured** intensity range that clips at neither end | `style` | A blown-out or black frame destroys injectivity for *every* dimension at once, not just this one |
+  | Light direction (azimuth/elevation) write + determinism | `style` | Shadow direction is the most salient style cue, so the strongest invariance test |
+  | Camera re-aimed **every capture**, not once at boot, + determinism | `style` | `set_world_poses_from_view` was only ever called once in Spike 1; per-sample jitter is a different usage pattern |
+  | Exposure: does a carb / post-process setting exist and accept a value | `style` | Locates the lever, or establishes there isn't one and the handle gets dropped rather than faked |
+  | **Write-order independence**: size-then-colour vs. colour-then-size → identical frame | both | USD attribute writes may cache or bind lazily; if order matters, the writer needs a fixed canonical order and that must be *known*, not assumed |
+  | **Cross-talk**: writing style knobs leaves the `base` read-back unchanged | both | A camera re-aim or a scale write that perturbs physics state would silently corrupt the task latents — cheap to check, expensive to discover later |
+  | Motion blur under teleport-no-step | `style` | **Expected clean FAIL, not a bug to force past.** Blur implies motion over time; this pipeline has none by design (§5.5). A recorded reason is a completed check, same as Spike 1's aliasing FAIL. |
+  | Sensor noise injection point | — | Confirms synthetic noise, if ever wanted, is a `generate.py` post-process on an already-deterministic frame, never a render setting (README §5.2.3) |
+
+- [ ] 🧑 **Run it on the pod, paste the whole table.** Same expectation as Spike 1: 2–4 iterations before every check has a verdict.
+- [ ] 🤖 **Fix and re-run** until every check has a verdict — a recorded FAIL with a reason counts.
+- [ ] 🤖 **README checkpoint 3** — §5.2.2/§5.2.3 promoted from "write path unverified" to measured ranges and confirmed API calls, or the handle dropped with the reason recorded; §3.2's three deferred rows resolved into §3.1; §7.5 rewritten with the verdicts; §11's two new attribute-path risk rows closed or updated.
+
+---
+
 ## Phase 4 — Build against verified reality
 
-> **Scope note on "verified": Spike 1/2 only cover physics-state writes** (joint angles, rigid-body pose). Cube size/color and every style/nuisance latent (lighting, per-sample camera jitter, exposure, materials, sensor noise, motion blur) use a different write path that hasn't been touched — see Phase 3's `spikes/spike_dynamic_attrs.py`. Don't wire any of those into `SceneBackend`/`generate.py` as a first-class latent before that spike has a verdict.
+> **Scope note on "verified": Spike 1/2 only cover physics-state writes** (joint angles, rigid-body pose) — README §5.2's `base` group. Every `full` and `style` latent (cube size and colour; lighting, per-sample camera jitter, exposure, materials) uses a write path that hasn't been touched. **Phase 3b is the gate**: don't wire any of those into `SceneBackend`/`generate.py` as a first-class latent before that spike has a verdict. The `base`-only pipeline does not wait on it.
 
 - [ ] 🤖 **`SceneBackend` protocol** — now, not before. The risk was never the method *names*; it was granularity and semantics, which the spike just settled.
   - Batched from the start (`B=1` valid) — absorbs the TiledCamera question either way
   - Segmentation remapped to **our own stable ids** — Isaac's annotator ids aren't stable across runs, which would silently turn the visibility column into noise
+  - `write_state(phi)` dispatches **by write path, not by group** (README §6.3): joint write, root-state write, attribute write. Three paths, three read-backs — `robot.data.*` does not cover a material or light write, so one blanket assertion would pass while a colour write was being silently dropped.
+  - A backend declares which roles it supports; an active spec naming a role the backend can't write must fail loudly at bind time, not render a scene missing a latent
 - [ ] 🤖 **`MockSceneBackend`** — numpy only, built to the captured conventions. Anti-aliased analytic shapes (hard edges would make two nearby latents render identically and fail the injectivity test on the one backend where it must pass)
 - [ ] 🤖 **Determinism/read-back gates as library code in `src/`**, not test-only — README §7.1 says the gate runs before every dataset generation, so `generate.py` and the tests must call the same function
   - **Acceptance is bitwise, not a threshold.** A temporal denoiser leak sits at ~0.3/255 and passes any sane threshold — while being exactly the structure a contrastive encoder is trained to find. A threshold doesn't weaken this gate, it disables it.
 - [ ] 🤖 **Negative controls** — inject faults into the mock (jitter, temporal leak, frozen write simulating #251, aliased buffers) and assert the gates **fire**
   - Without these, a gate that passes is a detector nobody has ever seen detect anything
+  - **Add one for the group design: a disconnected `style` knob.** A mock that accepts the write and renders identically must fail the §10.1 style-sensitivity gate. This is the failure mode that would otherwise report perfect encoder invariance and be believed.
 - [ ] 🤖 **Tier-1 contract suite** — one set of tests parametrized over both backends
+  - Parametrized over **group configuration** too (`base`, `base+style`, `full`, `full+style`), so the group plumbing is exercised on both backends rather than only in tier 0
 - [ ] 🧑 **Final short pod session:** run the suite against Isaac, paste results
 
 ---
@@ -210,11 +278,12 @@ pytest          # tier 0 + mock half green, zero collection errors
 **Pod:**
 ```
 ./isaaclab.sh -p spikes/spike_api.py --out /idtb/data/spike
+./isaaclab.sh -p spikes/spike_dynamic_attrs.py --out /idtb/data/spike_attrs   # Phase 3b
 ./isaaclab.sh -p -m pytest --isaac-mode=require
 ```
 `--isaac-mode=require` matters: without it, a broken container that can't import `isaaclab` silently deselects the whole Isaac tier and reports green.
 
-**Done means:** all four §7.2 spikes answered and recorded in README §3.1; protocol backed by running code on both sides; README describes nothing in this milestone as unknown.
+**Done means:** all four §7.2 spikes answered and recorded in README §3.1; **every `full`/`style` knob in §5.2 either has a measured range and a confirmed write call, or is dropped with the reason recorded** (§7.5); the pure layer carries the group split with tier-0 tests; protocol backed by running code on both sides; README describes nothing in this milestone as unknown.
 
 ---
 
