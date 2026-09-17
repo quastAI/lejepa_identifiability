@@ -951,6 +951,14 @@ def main() -> int:
             preset_settings = apply_preset("pathtracing_denoiser_off")
             capture = make_capture(current, depth=args.render_depth)
             base = state_of(joint_pos=current.base_joint_pos, cube_local=current.cube_base_local)
+            # Warm-up, discarded: this is the first capture since the preset switch
+            # above, and a `--num-envs` sweep measured the noise floor blow up to
+            # ~75 mad (vs. 0.0 normally) on 2 of 4 repeats at the exact same
+            # settings -- flaky, not deterministic (a repeat of the same failing
+            # run passed cleanly), consistent with a full render-mode switch
+            # needing a discarded settle render the same way an individual
+            # attribute write did in spikes/spike_dynamic_attrs.py.
+            capture(base)
             # The floor is what the renderer does when *nothing* changes; an
             # absolute delta is meaningless without it.
             first = capture(base).clone()
