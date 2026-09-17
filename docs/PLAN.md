@@ -119,7 +119,6 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
   - **A threshold test pins why §7.1 is bitwise:** a one-grey-level leak passes `tol=1.0` and fails `bitwise`, in the same assertion.
   - **Every Isaac symbol is resolved, not assumed.** `resolve()` tries the known spellings of `FRANKA_PANDA_CFG` and records which answered; the scene builds down a ladder (semantics+tiled+rich → plain rgb) so one unknown kwarg costs a recorded note, not the run; each preset's carb settings are read back, because carb silently creates unknown keys and only equality proves the path exists.
   - **Arm perturbation is a fraction of the *measured* half-range** (§5.2), not a hardcoded radian value.
-- [ ] 🤖🧑 **Still open: the actual `B ∈ {1,2,8,32}` throughput sweep.** The *mechanism* is confirmed by every run so far (`num_envs` is fixed per process, `facts.json` records it each time) — what hasn't happened yet is running `spike_api.py --num-envs {1,8,32}` to fill out the table. All four runs so far used the default `--num-envs 2`.
 - [x] 🧑🤖 **First real run on the pod, on 2026-09-16 — found two defects, both in the spike script itself, before any real check could run.** `boot_and_versions` passed clean (torch 2.10.0+cu128, isaaclab 6.1.16, CUDA 12.8, RTX 4090); `scene_builds_and_measures` failed on all three ladder rungs. Both fixed and covered by `tests/test_spike_api.py`, not just patched blind:
   - **The retry ladder contaminated its own retries.** A failed `InteractiveScene()` call leaves whatever prims it already created sitting on the stage — USD construction has no transactional rollback — so rungs 2 and 3 died on `A prim already exists at path: '/World/ground'` instead of their own errors, masking the real problem behind two copies of a bug in the harness. Fixed by giving every prim path a per-rung suffix (`/World/ground_r0`, `_r1`, `_r2`, …) instead of trying to reset the stage between attempts — safer than guessing whether `omni.usd.get_context().new_stage()` plays cleanly with an already-constructed `SimulationContext`, which nothing here was confident about.
   - **`FRANKA_PANDA_CFG`'s shipped `usd_path` 404s.** The real error, once the ladder could actually show it: `FileNotFoundError` on `.../Robots/FrankaEmika/panda_instanceable.usd`. Researched rather than guessed at — confirmed by direct HEAD request against the real asset tree that the object moved under a `Legacy/` subfolder and the shipped config was never updated to match. No tracked issue number found for this one specifically; the code (`franka.py`) and the asset tree have simply diverged. Franka is the only shipped robot config with this split — Unitree, ANYbotics, UR and the Kuka/Allegro configs were checked and are fine. `build_rig()` now patches the one known-broken suffix via a pure, tested `correct_franka_usd_path()` and records what it did either way — corrected, left alone because the suffix didn't match (upstream already fixed it, or a different path entirely), or failed to patch — rather than assuming the fix still applies on a future isaaclab version.
@@ -166,9 +165,13 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 
 - [x] 🧑 **Run it, paste the whole table.** Done — see the four run entries above; it took exactly the expected 2–4 iterations.
 - [x] 🤖 **Fix and re-run** until every check has a verdict. Done — 12/13 PASS, the one FAIL (`buffers_aliased`) is understood and permanent, same standard as "TiledCamera black under RealTimePathTracing, matches #367, use `Camera`" would have been.
-- [ ] 🤖 **Write `spikes/spike_dynamic_attrs.py`** — promoted out of this phase into its own **Phase 3b** below, because README §5.2's three latent groups turned it from "one follow-up spike" into the gate on the whole `full`/`style` design.
 
-- [ ] 🧑 **Save a few rendered arrays + their generating state, pull them down** — so the mock is built to real conventions, not assumed ones. Still open — `spike_api.py` doesn't currently save frames to disk, only stats to `facts.json`.
+> **Two loose ends, both moved to Phase 3b's pod session rather than left dangling here.** Spike 1 itself is done (line above) and needs no further pod time on its own account, but two small measurements never got taken and both need the pod up — which Phase 3b needs anyway, so they ride along instead of costing a second spin-up:
+> - the `B ∈ {1,2,8,32}` throughput sweep (`spike_api.py --num-envs {1,8,32}`) — the *mechanism* is confirmed (`num_envs` fixed per process, `facts.json` records it), only the sweep itself is missing; all four runs so far used the default `--num-envs 2`
+> - saving a few rendered arrays + their generating state to `/idtb/data/spike`, pulled down locally, so `MockSceneBackend` (Phase 4) is built to real conventions instead of assumed ones
+>
+> Tracked as their own checklist items under **Phase 3b**, not here, so Phase 3 closes clean.
+
 - [x] 🤖 **README checkpoint 2** — §7.2 rewritten with all four Spike answers; §7.3 `standard` preset now a real measured carb config (`PathTracing`, `spp=1`, `totalSpp=64`, denoiser off); §5.5 confirmed (zero `sim.step()`, measured, not assumed); §5.2 joint limits promoted from provisional to measured for the four active arm joints + gripper (cube position stays provisional — no table in the spike scene); §3.1/§3.2 Decision Register updated (four Spike questions moved from deferred to decided, plus the unplanned camera-aliasing finding added); §11 Risk Register rows closed/updated to match.
 - [x] 🧑 **Stop the pod** — done, 2026-09-16.
 
@@ -243,6 +246,9 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 
 - [ ] 🧑 **Run it on the pod, paste the whole table.** Same expectation as Spike 1: 2–4 iterations before every check has a verdict.
 - [ ] 🤖 **Fix and re-run** until every check has a verdict — a recorded FAIL with a reason counts.
+- [ ] 🧑 **While the pod is up anyway, close out Spike 1's two loose ends (not a blocker on Spike 5, just shared pod time — moved here from Phase 3, see the note there):**
+  - `spike_api.py --num-envs {1,8,32}` — fills out the `B ∈ {1,2,8,32}` throughput table
+  - Save a few rendered arrays + their generating state from `spike_api.py` to `/idtb/data/spike`, pull them down
 - [ ] 🤖 **README checkpoint 3** — §5.2.2/§5.2.3 promoted from "write path unverified" to measured ranges and confirmed API calls, or the handle dropped with the reason recorded; §3.2's three deferred rows resolved into §3.1; §7.5 rewritten with the verdicts; §11's two new attribute-path risk rows closed or updated.
 
 ---
