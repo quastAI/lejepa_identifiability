@@ -562,36 +562,40 @@ def apply_carb_settings(values: Mapping[str, Any]) -> dict[str, Any]:
     return applied
 
 
-def make_capture_static(rig: Rig) -> Capture:
+def make_capture_static(rig: Rig, *, depth: int = 1) -> Capture:
     """A capture with no write of its own -- for checks that mutate state
     explicitly before calling it (write-order independence, cross-talk).
 
     The §4.5 sequence, matching ``spike_api.py``'s proven-working one: flush,
-    aim the camera at the current state, ``sim.render()`` -- the call that
-    actually produces a new frame, missing from an earlier version of this
-    function -- then a final ``camera.update()`` to pull it. Spike 1 measured
-    that one render call suffices once `standard`'s carb settings are applied
-    (``totalSpp`` converges within a single external call, §7.2 Spike 3);
-    without any render call at all, every capture returns whatever frame the
-    sensor initialised with, which is exactly the "renders the same stale
-    frame every time" failure `sensitivity_report` exists to catch -- and
-    caught, on the first pod run of this file (docs/PLAN.md Phase 3b).
+    ``sim.render()`` ``depth`` times -- the call that actually produces a new
+    frame, missing from an earlier version of this function -- then a final
+    ``camera.update()`` to pull it. Spike 1 measured that one render call
+    suffices for *physics-state* writes once `standard`'s carb settings are
+    applied (§7.2 Spike 3); that measurement never covered material/light
+    attribute writes, and README §7.4's Known-limit note already predicted N
+    "almost certainly won't transfer" -- measured on the pod: every attribute
+    write showed non-zero back-to-back noise at ``depth=1`` while an unchanged
+    physics state didn't, consistent with a shader/material rebuild not
+    finishing within a single render call. ``depth`` is a CLI flag
+    (``--render-depth``) for exactly that reason -- it's an open question,
+    not a constant.
     """
 
     def capture(_state: Any) -> Tensor:
         rig.sim.forward()
         rig.camera.update(dt=0.0, force_recompute=True)
-        rig.sim.render()
+        for _ in range(depth):
+            rig.sim.render()
         rig.camera.update(dt=0.0, force_recompute=True)
         return rig.camera.data.output["rgb"]
 
     return capture
 
 
-def make_attribute_capture(rig: Rig, writer: Callable[[Any], None]) -> Capture:
+def make_attribute_capture(rig: Rig, writer: Callable[[Any], None], *, depth: int = 1) -> Capture:
     """A capture closure for a single-attribute write path (README §6.3's dispatch
     is by write path; this spike only ever varies one attribute per check)."""
-    static_capture = make_capture_static(rig)
+    static_capture = make_capture_static(rig, depth=depth)
 
     def capture(value: Any) -> Tensor:
         writer(value)
@@ -618,7 +622,7 @@ class KnobCheck:
     readback_atol: float = 0.0
 
 
-def run_knob_check(rig: Rig, knob: KnobCheck) -> dict[str, Any]:
+def run_knob_check(rig: Rig, knob: KnobCheck, *, depth: int = 1) -> dict[str, Any]:
     problems: list[str] = []
     facts: dict[str, Any] = {}
 
@@ -642,7 +646,7 @@ def run_knob_check(rig: Rig, knob: KnobCheck) -> dict[str, Any]:
 
     # -- 2. does it move pixels above the noise floor? -----------------------
     preset_settings = apply_preset("pathtracing_denoiser_off")
-    capture = make_attribute_capture(rig, knob.write)
+    capture = make_attribute_capture(rig, knob.write, depth=depth)
     first = capture(knob.base_value).clone()
     second = capture(knob.base_value).clone()
     noise_floor = mean_abs_diff(first, second)
@@ -677,6 +681,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", type=Path, default=Path("/idtb/data/spike_attrs"))
     parser.add_argument("--resolution", type=int, nargs=2, default=(128, 128), metavar=("H", "W"))
+    parser.add_argument(
+        "--render-depth",
+        type=int,
+        default=8,
+        help="sim.render() calls per capture -- Spike 1 found 1 suffices for physics-state "
+        "writes; measured on the pod that material/light attribute writes show non-zero "
+        "back-to-back noise at depth=1, consistent with README §7.4's Known-limit note "
+        "that N 'almost certainly won't transfer' to a different write path",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
 
@@ -754,6 +767,7 @@ def main() -> int:
                     base_value=BASE_CUBE_EDGE_M,
                     perturbed_value=PERTURBED_CUBE_EDGE_M,
                 ),
+                depth=args.render_depth,
             )
 
         report.run("cube_scale", check_cube_scale)
@@ -786,7 +800,8 @@ def main() -> int:
                     readback_atol=CUBE_HUE_READBACK_ATOL,
                     base_value=BASE_CUBE_HUE,
                     perturbed_value=PERTURBED_CUBE_HUE,
-                )
+                ),
+                depth=args.render_depth,
             )
 
         report.run("cube_hue", check_cube_hue)
@@ -804,7 +819,8 @@ def main() -> int:
                     readback_atol=LIGHT_INTENSITY_READBACK_ATOL,
                     base_value=BASE_LIGHT_INTENSITY,
                     perturbed_value=PERTURBED_LIGHT_INTENSITY,
-                )
+                ),
+                depth=args.render_depth,
             )
 
         report.run("light_intensity", check_light_intensity)
@@ -821,7 +837,8 @@ def main() -> int:
                     readback_atol=LIGHT_WARMTH_READBACK_ATOL,
                     base_value=BASE_LIGHT_WARMTH_K,
                     perturbed_value=PERTURBED_LIGHT_WARMTH_K,
-                )
+                ),
+                depth=args.render_depth,
             )
 
         report.run("light_warmth", check_light_warmth)
@@ -829,7 +846,9 @@ def main() -> int:
         def check_light_intensity_clipping_range() -> dict[str, Any]:
             current = need_rig()
             apply_preset("pathtracing_denoiser_off")
-            capture = make_attribute_capture(current, lambda v: write_light_intensity(current, v))
+            capture = make_attribute_capture(
+                current, lambda v: write_light_intensity(current, v), depth=args.render_depth
+            )
             samples = {
                 value: frame_stats(capture(value).clone())
                 for value in INTENSITY_CANDIDATES_FOR_CLIPPING
@@ -863,7 +882,8 @@ def main() -> int:
                     write=write_direction,
                     base_value=BASE_LIGHT_AZIMUTH_ELEVATION,
                     perturbed_value=PERTURBED_LIGHT_AZIMUTH_ELEVATION,
-                )
+                ),
+                depth=args.render_depth,
             )
 
         report.run("light_direction", check_light_direction)
@@ -878,7 +898,8 @@ def main() -> int:
                     write=lambda xy: aim_camera(current, jitter_xy=xy),
                     base_value=BASE_CAMERA_JITTER,
                     perturbed_value=PERTURBED_CAMERA_JITTER,
-                )
+                ),
+                depth=args.render_depth,
             )
 
         report.run("camera_jitter_per_capture", check_camera_jitter)
@@ -886,24 +907,22 @@ def main() -> int:
         # -- exposure ----------------------------------------------------------
         def check_exposure_lever() -> dict[str, Any]:
             current = need_rig()
-            readbacks: dict[str, Any] = {}
+            static_capture = make_capture_static(current, depth=args.render_depth)
 
-            def apply_and_capture(values: Mapping[str, Any]) -> Tensor:
-                readbacks["latest"] = apply_carb_settings(values)
-                current.sim.forward()
-                current.camera.update(dt=0.0, force_recompute=True)
-                return current.camera.data.output["rgb"]
+            def apply_and_capture(values: Mapping[str, Any]) -> tuple[dict[str, Any], Tensor]:
+                readback = apply_carb_settings(values)
+                return readback, static_capture(None).clone()
 
-            baseline = apply_and_capture({}).clone()
-            candidate = apply_and_capture(EXPOSURE_CANDIDATES).clone()
-            repeat = apply_and_capture(EXPOSURE_CANDIDATES).clone()
-            apply_and_capture({})  # restore
+            _, baseline = apply_and_capture({})
+            exposure_readback, candidate = apply_and_capture(EXPOSURE_CANDIDATES)
+            _, repeat = apply_and_capture(EXPOSURE_CANDIDATES)
+            apply_and_capture({})  # restore; its own readback isn't needed again
 
             mad = mean_abs_diff(baseline, candidate)
-            accepted = {k: v for k, v in readbacks["latest"].items() if v.get("accepted")}
+            accepted = {k: v for k, v in exposure_readback.items() if v.get("accepted")}
             facts = {
                 "candidates": EXPOSURE_CANDIDATES,
-                "readback": readbacks["latest"],
+                "readback": exposure_readback,
                 "accepted_keys": list(accepted),
                 "mad_vs_baseline": mad,
                 "repeat_bitwise_equal": bitwise_equal(candidate, repeat),
@@ -911,7 +930,7 @@ def main() -> int:
             if not accepted:
                 raise CheckFailed(
                     "no candidate exposure setting was accepted on this build -- readback "
-                    f"{readbacks['latest']}; the handle is dropped, not faked (README §5.2.3)"
+                    f"{exposure_readback}; the handle is dropped, not faked (README §5.2.3)"
                 )
             if mad <= 0.0:
                 raise CheckFailed(
@@ -927,7 +946,7 @@ def main() -> int:
         def check_write_order_independence() -> dict[str, Any]:
             current = need_rig()
             preset_settings = apply_preset("pathtracing_denoiser_off")
-            capture = make_capture_static(current)
+            capture = make_capture_static(current, depth=args.render_depth)
 
             reset_cube_to_default(current)
             write_cube_scale(current, PERTURBED_CUBE_EDGE_M)
@@ -1004,7 +1023,7 @@ def main() -> int:
             current = need_rig()
             blur_settings = apply_carb_settings(MOTION_BLUR_CANDIDATES)
             preset_settings = apply_preset("pathtracing_denoiser_off")
-            capture = make_capture_static(current)
+            capture = make_capture_static(current, depth=args.render_depth)
             first = capture(None).clone()
             second = capture(None).clone()
             mad = mean_abs_diff(first, second)
