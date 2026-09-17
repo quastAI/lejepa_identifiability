@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 
 SPIKE = Path(__file__).resolve().parent.parent / "spikes" / "spike_dynamic_attrs.py"
 
@@ -175,6 +176,46 @@ def test_carb_value_matches_compares_bools_and_ints_exactly():
     assert not spike.carb_value_matches(False, True)
     assert spike.carb_value_matches(64, 64)
     assert not spike.carb_value_matches(64, 63)
+
+
+# --- diff_summary: localizing a mad number to an actual pixel region -----------
+
+
+def test_diff_summary_finds_the_max_diff_pixel():
+    a = torch.zeros(1, 4, 4, 3, dtype=torch.uint8)
+    b = a.clone()
+    b[0, 2, 3, 1] = 200  # one pixel, one channel, way off
+    summary = spike.diff_summary(a, b)
+    assert summary["max_abs_diff"] == pytest.approx(200.0)
+    assert summary["value_a_at_max_diff"] == pytest.approx(0.0)
+    assert summary["value_b_at_max_diff"] == pytest.approx(200.0)
+    # index is (batch, row, col, channel) -- the exact pixel that moved.
+    assert summary["max_diff_at_index"] == [0, 2, 3, 1]
+
+
+def test_diff_summary_identical_frames_are_zero_everywhere():
+    a = torch.full((1, 4, 4, 3), 42, dtype=torch.uint8)
+    summary = spike.diff_summary(a, a.clone())
+    assert summary["mean_abs_diff"] == pytest.approx(0.0)
+    assert summary["max_abs_diff"] == pytest.approx(0.0)
+    assert summary["fraction_pixels_changed_gt_1"] == pytest.approx(0.0)
+
+
+def test_diff_summary_distinguishes_uniform_shift_from_localized_spike():
+    """The whole point: two frames with the same mean_abs_diff can look
+    completely different -- a uniform +2 everywhere vs. one blown-out pixel --
+    and fraction_pixels_changed_gt_1 is what tells them apart.
+    """
+    base = torch.zeros(1, 4, 4, 3, dtype=torch.uint8)
+    uniform = torch.full((1, 4, 4, 3), 2, dtype=torch.uint8)
+    localized = base.clone()
+    localized[0, 0, 0, 0] = 96  # 96 / 48 pixels ~= 2 mean, concentrated in one spot
+
+    uniform_summary = spike.diff_summary(base, uniform)
+    localized_summary = spike.diff_summary(base, localized)
+    assert uniform_summary["mean_abs_diff"] == pytest.approx(localized_summary["mean_abs_diff"])
+    assert uniform_summary["fraction_pixels_changed_gt_1"] == pytest.approx(1.0)
+    assert localized_summary["fraction_pixels_changed_gt_1"] == pytest.approx(1.0 / 48.0)
 
 
 # --- reused pure layer, sanity that the load actually worked --------------------

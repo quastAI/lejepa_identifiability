@@ -175,6 +175,30 @@ def cube_size_radius_from_aperture(aperture_m: float, *, margin: float = 0.8) ->
     return margin * 2.0 * aperture_m
 
 
+def diff_summary(a: Tensor, b: Tensor) -> dict[str, Any]:
+    """Where two same-shape frames differ -- localizes a mad number to an actual
+    pixel region, so "back-to-back mad=1.87" becomes something you can reason
+    about without a GUI: a spatially uniform shift (every pixel off by ~1.87,
+    consistent with a global exposure/accumulation artefact) reads completely
+    differently from a handful of pixels off by 100+ (an edge/aliasing glitch)
+    averaging out to the same mad.
+    """
+    diff = (a.detach().to(torch.float32) - b.detach().to(torch.float32)).abs()
+    flat = diff.flatten()
+    max_idx = int(torch.argmax(flat).item())
+    coords = torch.unravel_index(torch.tensor(max_idx), diff.shape)
+    return {
+        "shape": list(diff.shape),
+        "mean_abs_diff": float(flat.mean().item()),
+        "std_abs_diff": float(flat.std().item()),
+        "max_abs_diff": float(flat.max().item()),
+        "fraction_pixels_changed_gt_1": float((flat > 1.0).float().mean().item()),
+        "max_diff_at_index": [int(c) for c in coords],
+        "value_a_at_max_diff": a.flatten()[max_idx].item(),
+        "value_b_at_max_diff": b.flatten()[max_idx].item(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Isaac layer: every import lives inside a function, after SimulationApp exists.
 # ---------------------------------------------------------------------------
@@ -717,6 +741,13 @@ def main() -> int:
         "back-to-back noise at depth=1, consistent with README §7.4's Known-limit note "
         "that N 'almost certainly won't transfer' to a different write path",
     )
+    parser.add_argument(
+        "--save-frames",
+        action="store_true",
+        help="save the a1/b1/b2/a2 frames determinism_report compares, for a few "
+        "representative knobs, as <out>/frames/*.pt -- so the back-to-back noise found "
+        "on cube.hue/light.*/cam.jitter can be inspected directly instead of guessed at",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
 
@@ -1074,6 +1105,66 @@ def main() -> int:
             }
 
         report.run("sensor_noise_injection_point", check_sensor_noise_injection_point)
+
+        # -- optional: the actual a1/b1/b2/a2 frames, for a few representative knobs --
+        if args.save_frames:
+
+            def check_save_frames() -> dict[str, Any]:
+                current = need_rig()
+                frames_dir = out_dir / "frames"
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                knobs: list[tuple[str, Callable[[Any], None], Any, Any]] = [
+                    (
+                        "cube.size",
+                        lambda v: write_cube_scale(current, v),
+                        BASE_CUBE_EDGE_M,
+                        PERTURBED_CUBE_EDGE_M,
+                    ),
+                    (
+                        "cube.hue",
+                        lambda v: write_cube_hue(current, v),
+                        BASE_CUBE_HUE,
+                        PERTURBED_CUBE_HUE,
+                    ),
+                    (
+                        "light.intensity",
+                        lambda v: write_light_intensity(current, v),
+                        BASE_LIGHT_INTENSITY,
+                        PERTURBED_LIGHT_INTENSITY,
+                    ),
+                    (
+                        "cam.jitter",
+                        lambda xy: aim_camera(current, jitter_xy=xy),
+                        BASE_CAMERA_JITTER,
+                        PERTURBED_CAMERA_JITTER,
+                    ),
+                ]
+                saved: dict[str, Any] = {}
+                for role, writer, base_value, perturbed_value in knobs:
+                    capture = make_attribute_capture(current, writer, depth=args.render_depth)
+                    a1 = capture(base_value).clone().cpu()
+                    b1 = capture(perturbed_value).clone().cpu()
+                    b2 = capture(perturbed_value).clone().cpu()
+                    a2 = capture(base_value).clone().cpu()
+                    frames = {"a1": a1, "b1": b1, "b2": b2, "a2": a2}
+                    slug = role.replace(".", "_")
+                    for name, frame in frames.items():
+                        torch.save(
+                            {
+                                "rgb": frame,
+                                "role": role,
+                                "base_value": base_value,
+                                "perturbed_value": perturbed_value,
+                            },
+                            frames_dir / f"{slug}_{name}.pt",
+                        )
+                    saved[role] = {
+                        "order_independent_a1_vs_a2": diff_summary(a1, a2),
+                        "back_to_back_b1_vs_b2": diff_summary(b1, b2),
+                    }
+                return {"frames_dir": str(frames_dir), "saved": saved}
+
+            report.run("save_sample_frames", check_save_frames)
 
     finally:
         payload = {
