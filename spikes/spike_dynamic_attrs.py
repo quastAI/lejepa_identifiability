@@ -596,22 +596,21 @@ def make_attribute_capture(rig: Rig, writer: Callable[[Any], None], *, depth: in
     """A capture closure for a single-attribute write path (README §6.3's dispatch
     is by write path; this spike only ever varies one attribute per check).
 
-    Renders **twice** per call, discarding the first: measured on the pod,
-    every material/light/camera write showed non-zero back-to-back noise
-    (~1.8 mad) that raising ``--render-depth`` from 1 to 8 did not reduce at
-    all -- ruling out totalSpp accumulation as the cause, since that's exactly
-    what more render() calls within one capture would fix (and did, for
-    cube.size's pure xform write). That points at a settle cost that needs a
-    full separate render cycle after a write, not more samples within one --
-    plausibly a deferred Hydra material/light rebuild that a write's own
-    render call doesn't wait for. The warm-up call is discarded; only the
-    second is measured, at the same ``depth`` either way.
+    A discard-the-first-render "warm-up" variant was tried and reverted: it
+    did not fix the ~1.8 mad back-to-back noise on material/light/camera
+    writes, and it *regressed* cube.size, which had been bitwise-clean
+    (0.0/0.0) at depth=8 with a single render. That a change to the capture
+    sequence made a previously-clean case worse, rather than leaving it
+    alone, is itself evidence against a capture-sequence explanation --
+    consistent with spikes/spike_api.py's independently confirmed finding
+    that this exact driver/renderer is flaky run-to-run (an identical
+    ``--num-envs 1`` run failed once and passed once, unchanged). See
+    docs/PLAN.md Phase 3b for the reproducibility test this predicts.
     """
     static_capture = make_capture_static(rig, depth=depth)
 
     def capture(value: Any) -> Tensor:
         writer(value)
-        static_capture(value)  # warm-up: let a deferred rebuild settle, discard the frame
         return static_capture(value)
 
     return capture
