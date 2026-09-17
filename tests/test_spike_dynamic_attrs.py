@@ -155,6 +155,28 @@ def test_cube_size_radius_from_aperture_rejects_a_margin_outside_zero_one():
         spike.cube_size_radius_from_aperture(0.04, margin=1.5)
 
 
+# --- carb_value_matches: tolerant of carb's float32 round-trip -----------------
+
+
+def test_carb_value_matches_a_float32_rounded_readback():
+    """The exact bug this guards against: carb stores 1.6 as float32 and hands
+    back 1.600000023841858, which a strict == would wrongly call rejected.
+    """
+    assert spike.carb_value_matches(1.6, 1.600000023841858)
+    assert spike.carb_value_matches(200.0, 200.00000762939453)
+
+
+def test_carb_value_matches_rejects_a_genuinely_different_float():
+    assert not spike.carb_value_matches(1.6, 1.8)
+
+
+def test_carb_value_matches_compares_bools_and_ints_exactly():
+    assert spike.carb_value_matches(False, False)
+    assert not spike.carb_value_matches(False, True)
+    assert spike.carb_value_matches(64, 64)
+    assert not spike.carb_value_matches(64, 63)
+
+
 # --- reused pure layer, sanity that the load actually worked --------------------
 
 

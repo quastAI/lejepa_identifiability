@@ -148,6 +148,19 @@ def azel_to_direction(azimuth_rad: float, elevation_rad: float) -> tuple[float, 
     )
 
 
+def carb_value_matches(wanted: Any, read_back: Any) -> bool:
+    """Was a carb setting actually accepted -- tolerant of float32 round-trip.
+
+    carb settings commonly store floats as float32 internally; ``1.6`` can
+    read back as ``1.600000023841858``, and a strict ``==`` would then report
+    a perfectly good setting as "not accepted". Bools and ints compare exactly
+    (``math.isclose`` on a bool is well-defined but not what's meant here).
+    """
+    if isinstance(wanted, float) and isinstance(read_back, int | float):
+        return math.isclose(read_back, wanted, rel_tol=1e-5, abs_tol=1e-6)
+    return read_back == wanted
+
+
 def cube_size_radius_from_aperture(aperture_m: float, *, margin: float = 0.8) -> float:
     """`cube.size`'s upper half-range, from the *measured* per-finger aperture.
 
@@ -301,6 +314,12 @@ def build_rig(args: argparse.Namespace) -> Rig:
         # down with it (structural rule 2) -- recorded here, raised later only
         # by the checks that actually need the shader.
         notes["cube_shader_resolved_via"] = f"unresolved: {type(exc).__name__}: {exc}"
+        # Logged unconditionally on failure so the next run doesn't need to
+        # guess again -- see describe_prim_tree's docstring.
+        try:
+            notes["cube_prim_tree"] = describe_prim_tree(cube_prim)
+        except Exception as tree_exc:
+            notes["cube_prim_tree"] = f"unavailable: {type(tree_exc).__name__}: {tree_exc}"
 
     rig = Rig(
         sim=sim,
@@ -319,11 +338,15 @@ def build_rig(args: argparse.Namespace) -> Rig:
 def resolve_cube_shader(cube_prim: Any) -> tuple[str, Any]:
     """Find the UsdShade.Shader driving the cube's diffuse colour.
 
-    Tries the schema-correct lookup first (works regardless of where the
-    spawner happened to put the material), falling back to the conventional
-    ``Looks/`` path Kit-based spawners commonly use.
+    Tries the schema-correct lookup on the cube prim itself first, then walks
+    its whole subtree for a bound material -- measured on the pod: binding-API
+    lookup on ``cube_prim`` directly found nothing (docs/PLAN.md Phase 3b,
+    first run), meaning the spawner most likely nests the actual visual
+    geometry (and its binding) under a child prim rather than binding on
+    ``cube_prim`` itself. The recursive search finds it regardless of naming,
+    which is more robust than guessing another literal path.
     """
-    from pxr import UsdShade
+    from pxr import Usd, UsdShade
 
     def via_binding_api() -> Any:
         material, _ = UsdShade.MaterialBindingAPI(cube_prim).ComputeBoundMaterial()
@@ -334,17 +357,51 @@ def resolve_cube_shader(cube_prim: Any) -> tuple[str, Any]:
             raise RuntimeError("material has no surface source")
         return source
 
+    def via_recursive_binding_search() -> Any:
+        for prim in Usd.PrimRange(cube_prim):
+            material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+            if not material:
+                continue
+            source, _, _ = material.ComputeSurfaceSource()
+            if source:
+                return source
+        raise RuntimeError("no descendant of the cube prim has a bound material with a surface")
+
     def via_looks_convention() -> Any:
         stage = cube_prim.GetStage()
-        for suffix in ("Looks/Material/Shader", "Looks/PreviewSurface/Shader"):
+        for suffix in (
+            "Looks/Material/Shader",
+            "Looks/PreviewSurface/Shader",
+            "Looks/visualMaterial/Shader",
+        ):
             shader_prim = stage.GetPrimAtPath(cube_prim.GetPath().AppendPath(suffix))
             if shader_prim and shader_prim.IsValid():
                 return UsdShade.Shader(shader_prim)
         raise RuntimeError("no shader found under the Looks/ convention")
 
     return try_candidates(
-        [("material_binding_api", via_binding_api), ("looks_convention", via_looks_convention)]
+        [
+            ("material_binding_api", via_binding_api),
+            ("recursive_binding_search", via_recursive_binding_search),
+            ("looks_convention", via_looks_convention),
+        ]
     )
+
+
+def describe_prim_tree(root_prim: Any) -> list[str]:
+    """Every descendant of ``root_prim``, with its type and any bound material --
+    a diagnostic, not a write path. Logged unconditionally in scene_builds_and_measures
+    so a resolution failure is something to *read*, not guess at again (README §7.5:
+    "resolve, don't guess" extends to debugging the resolver itself).
+    """
+    from pxr import Usd, UsdShade
+
+    lines = []
+    for prim in Usd.PrimRange(root_prim):
+        material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+        bound = material.GetPath().pathString if material else None
+        lines.append(f"{prim.GetPath()} [{prim.GetTypeName()}] bound_material={bound}")
+    return lines
 
 
 def aim_camera(rig: Rig, *, jitter_xy: tuple[float, float]) -> None:
@@ -398,13 +455,38 @@ def read_light_warmth(rig: Rig) -> float:
     return float(UsdLux.LightAPI(rig.light_prim).GetColorTemperatureAttr().Get())
 
 
+def _find_or_add_xform_op(prim: Any, op_type: Any) -> Any:
+    """Find an existing xform op of ``op_type`` on ``prim``, or add one.
+
+    ``UsdGeom.XformCommonAPI`` refuses to touch a prim whose existing xform ops
+    aren't in exactly the pattern it expects, and fails *silently* -- `Set*`
+    returns ``False`` rather than raising, which is indistinguishable from
+    success unless the caller checks it. Measured on the pod: `cube.size`'s
+    write never landed and nothing said why (docs/PLAN.md Phase 3b, first
+    run). Working the ops directly is robust to whatever ``xformOpOrder``
+    Isaac Lab's spawner already authored.
+    """
+    from pxr import UsdGeom
+
+    xformable = UsdGeom.Xformable(prim)
+    for op in xformable.GetOrderedXformOps():
+        if op.GetOpType() == op_type:
+            return op
+    if op_type == UsdGeom.XformOp.TypeScale:
+        return xformable.AddScaleOp()
+    if op_type == UsdGeom.XformOp.TypeRotateXYZ:
+        return xformable.AddRotateXYZOp()
+    raise ValueError(f"no add-op helper wired up for {op_type!r}")
+
+
 def write_cube_scale(rig: Rig, edge_m: float) -> None:
     """``cube.size`` via an xform scale multiplier on top of the authored edge --
     not a root-state write (README §5.2.2)."""
     from pxr import Gf, UsdGeom
 
     factor = edge_m / BASE_CUBE_EDGE_M
-    UsdGeom.XformCommonAPI(rig.cube_prim).SetScale(Gf.Vec3f(factor, factor, factor))
+    op = _find_or_add_xform_op(rig.cube_prim, UsdGeom.XformOp.TypeScale)
+    op.Set(Gf.Vec3f(factor, factor, factor))
 
 
 def write_cube_hue(rig: Rig, hue: float) -> None:
@@ -442,7 +524,7 @@ def write_light_direction(
 
     A ``UsdLux`` distant/directional light emits along its local ``-Z``; the
     rotation is built as "take -Z to the wanted direction" and decomposed into
-    the XYZ Euler angles ``XformCommonAPI`` wants. The decomposition's angle
+    the XYZ Euler angles a rotateXYZ op wants. The decomposition's angle
     *order* is the one part of this file worth a visual sanity check on the
     pod (does the shadow actually move where azimuth/elevation say it should)
     rather than trusting the math alone.
@@ -452,10 +534,8 @@ def write_light_direction(
     direction = azel_to_direction(azimuth_rad, elevation_rad)
     rotation = Gf.Rotation(Gf.Vec3d(0, 0, -1), Gf.Vec3d(*direction))
     euler_deg = rotation.Decompose(Gf.Vec3d.XAxis(), Gf.Vec3d.YAxis(), Gf.Vec3d.ZAxis())
-    UsdGeom.XformCommonAPI(rig.light_prim).SetRotate(
-        Gf.Vec3f(euler_deg[0], euler_deg[1], euler_deg[2]),
-        UsdGeom.XformCommonAPI.RotationOrderXYZ,
-    )
+    op = _find_or_add_xform_op(rig.light_prim, UsdGeom.XformOp.TypeRotateXYZ)
+    op.Set(Gf.Vec3f(euler_deg[0], euler_deg[1], euler_deg[2]))
     return direction
 
 
@@ -472,7 +552,11 @@ def apply_carb_settings(values: Mapping[str, Any]) -> dict[str, Any]:
         try:
             settings.set(key, value)
             read_back = settings.get(key)
-            applied[key] = {"wanted": value, "read_back": read_back, "accepted": read_back == value}
+            applied[key] = {
+                "wanted": value,
+                "read_back": read_back,
+                "accepted": carb_value_matches(value, read_back),
+            }
         except Exception as exc:
             applied[key] = {"wanted": value, "error": f"{type(exc).__name__}: {exc}"}
     return applied
@@ -480,10 +564,24 @@ def apply_carb_settings(values: Mapping[str, Any]) -> dict[str, Any]:
 
 def make_capture_static(rig: Rig) -> Capture:
     """A capture with no write of its own -- for checks that mutate state
-    explicitly before calling it (write-order independence, cross-talk)."""
+    explicitly before calling it (write-order independence, cross-talk).
+
+    The §4.5 sequence, matching ``spike_api.py``'s proven-working one: flush,
+    aim the camera at the current state, ``sim.render()`` -- the call that
+    actually produces a new frame, missing from an earlier version of this
+    function -- then a final ``camera.update()`` to pull it. Spike 1 measured
+    that one render call suffices once `standard`'s carb settings are applied
+    (``totalSpp`` converges within a single external call, §7.2 Spike 3);
+    without any render call at all, every capture returns whatever frame the
+    sensor initialised with, which is exactly the "renders the same stale
+    frame every time" failure `sensitivity_report` exists to catch -- and
+    caught, on the first pod run of this file (docs/PLAN.md Phase 3b).
+    """
 
     def capture(_state: Any) -> Tensor:
         rig.sim.forward()
+        rig.camera.update(dt=0.0, force_recompute=True)
+        rig.sim.render()
         rig.camera.update(dt=0.0, force_recompute=True)
         return rig.camera.data.output["rgb"]
 
@@ -614,6 +712,12 @@ def main() -> int:
                     facts[name], _ = resolve([path])
                 except Exception as exc:
                     facts[name] = f"unavailable: {type(exc).__name__}: {exc}"
+            if torch.cuda.is_available():
+                facts["cuda"] = torch.version.cuda
+                facts["gpu"] = torch.cuda.get_device_name(0)
+                facts["capability"] = ".".join(str(c) for c in torch.cuda.get_device_capability(0))
+            else:
+                facts["gpu"] = "torch reports no CUDA device"
             return facts
 
         report.run("boot_and_versions", check_versions)
@@ -806,8 +910,8 @@ def main() -> int:
             }
             if not accepted:
                 raise CheckFailed(
-                    "no candidate exposure setting was accepted on this build -- tried "
-                    f"{list(EXPOSURE_CANDIDATES)}; the handle is dropped, not faked (README §5.2.3)"
+                    "no candidate exposure setting was accepted on this build -- readback "
+                    f"{readbacks['latest']}; the handle is dropped, not faked (README §5.2.3)"
                 )
             if mad <= 0.0:
                 raise CheckFailed(
