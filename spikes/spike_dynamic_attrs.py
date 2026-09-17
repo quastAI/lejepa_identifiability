@@ -321,6 +321,20 @@ def build_rig(args: argparse.Namespace) -> Rig:
         except Exception as tree_exc:
             notes["cube_prim_tree"] = f"unavailable: {type(tree_exc).__name__}: {tree_exc}"
 
+    # Applied exactly once, here -- not per check. Measured on the pod: every
+    # check after the first re-applied this same preset redundantly (setting
+    # carb keys to values they already had), and every one of those *repeat*
+    # applications showed the same ~1.8 mad back-to-back noise regardless of
+    # which attribute it was actually varying, while the one check that ran
+    # before any repeat application (cube.size, the first to run) was clean.
+    # That pattern -- reproducible bit-for-bit across separate process runs,
+    # so not driver flakiness -- points at the redundant re-application
+    # itself, not the individual attribute writes. Testing that directly.
+    notes["preset_applied"] = {
+        "name": "pathtracing_denoiser_off",
+        "settings": apply_preset("pathtracing_denoiser_off"),
+    }
+
     rig = Rig(
         sim=sim,
         device=str(sim.device),
@@ -657,7 +671,8 @@ def run_knob_check(rig: Rig, knob: KnobCheck, *, depth: int = 1) -> dict[str, An
     knob.write(knob.base_value)
 
     # -- 2. does it move pixels above the noise floor? -----------------------
-    preset_settings = apply_preset("pathtracing_denoiser_off")
+    # The preset is applied once, at scene build -- not here. See build_rig's
+    # note on why a *repeat* application was itself the likely noise source.
     capture = make_attribute_capture(rig, knob.write, depth=depth)
     first = capture(knob.base_value).clone()
     second = capture(knob.base_value).clone()
@@ -673,7 +688,7 @@ def run_knob_check(rig: Rig, knob: KnobCheck, *, depth: int = 1) -> dict[str, An
     # -- 3. still bitwise deterministic under `standard`? --------------------
     det = determinism_report(capture, knob.base_value, knob.perturbed_value, tol=0.0)
     facts["determinism"] = det
-    facts["preset_applied"] = {"name": "pathtracing_denoiser_off", "settings": preset_settings}
+    facts["preset_applied"] = rig.notes.get("preset_applied")
     if not det["content_reproducible"]:
         problems.append(
             f"{knob.role}: not bitwise deterministic under `standard` while varying it "
@@ -857,7 +872,6 @@ def main() -> int:
 
         def check_light_intensity_clipping_range() -> dict[str, Any]:
             current = need_rig()
-            apply_preset("pathtracing_denoiser_off")
             capture = make_attribute_capture(
                 current, lambda v: write_light_intensity(current, v), depth=args.render_depth
             )
@@ -957,7 +971,6 @@ def main() -> int:
         # -- write-order independence -------------------------------------------
         def check_write_order_independence() -> dict[str, Any]:
             current = need_rig()
-            preset_settings = apply_preset("pathtracing_denoiser_off")
             capture = make_capture_static(current, depth=args.render_depth)
 
             reset_cube_to_default(current)
@@ -975,7 +988,7 @@ def main() -> int:
             facts = {
                 "mad": mad,
                 "bitwise_equal": bitwise_equal(size_then_hue, hue_then_size),
-                "preset_applied": {"name": "pathtracing_denoiser_off", "settings": preset_settings},
+                "preset_applied": current.notes.get("preset_applied"),
             }
             if not facts["bitwise_equal"]:
                 raise CheckFailed(
@@ -1034,7 +1047,6 @@ def main() -> int:
         def check_motion_blur() -> dict[str, Any]:
             current = need_rig()
             blur_settings = apply_carb_settings(MOTION_BLUR_CANDIDATES)
-            preset_settings = apply_preset("pathtracing_denoiser_off")
             capture = make_capture_static(current, depth=args.render_depth)
             first = capture(None).clone()
             second = capture(None).clone()
@@ -1042,7 +1054,8 @@ def main() -> int:
             apply_carb_settings({k: False for k in MOTION_BLUR_CANDIDATES if "enabled" in k})
             raise CheckFailed(
                 f"no motion-blur artefact between two captures of the same teleported "
-                f"state (mad={mad:.4g}; blur settings {blur_settings}, preset {preset_settings}) "
+                f"state (mad={mad:.4g}; blur settings {blur_settings}, "
+                f"preset {current.notes.get('preset_applied')}) "
                 "-- expected, not a bug: motion blur needs velocity across frames and this "
                 "pipeline has none by design (README §5.5). Recorded as a completed check, "
                 "same category as Spike 1's aliasing FAIL."
