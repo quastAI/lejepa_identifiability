@@ -594,11 +594,24 @@ def make_capture_static(rig: Rig, *, depth: int = 1) -> Capture:
 
 def make_attribute_capture(rig: Rig, writer: Callable[[Any], None], *, depth: int = 1) -> Capture:
     """A capture closure for a single-attribute write path (README §6.3's dispatch
-    is by write path; this spike only ever varies one attribute per check)."""
+    is by write path; this spike only ever varies one attribute per check).
+
+    Renders **twice** per call, discarding the first: measured on the pod,
+    every material/light/camera write showed non-zero back-to-back noise
+    (~1.8 mad) that raising ``--render-depth`` from 1 to 8 did not reduce at
+    all -- ruling out totalSpp accumulation as the cause, since that's exactly
+    what more render() calls within one capture would fix (and did, for
+    cube.size's pure xform write). That points at a settle cost that needs a
+    full separate render cycle after a write, not more samples within one --
+    plausibly a deferred Hydra material/light rebuild that a write's own
+    render call doesn't wait for. The warm-up call is discarded; only the
+    second is measured, at the same ``depth`` either way.
+    """
     static_capture = make_capture_static(rig, depth=depth)
 
     def capture(value: Any) -> Tensor:
         writer(value)
+        static_capture(value)  # warm-up: let a deferred rebuild settle, discard the frame
         return static_capture(value)
 
     return capture
