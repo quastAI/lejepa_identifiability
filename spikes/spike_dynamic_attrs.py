@@ -224,6 +224,13 @@ BASE_LIGHT_INTENSITY = 900.0
 PERTURBED_LIGHT_INTENSITY = 2400.0
 LIGHT_INTENSITY_READBACK_ATOL = 1e-3
 
+# UsdLux DistantLight's `angle` (degrees) is its angular diameter -- near-zero
+# gives a knife-edge shadow, maximally sensitive to sub-pixel sampling with no
+# antialiasing. save_sample_frames localized the back-to-back noise to a hard,
+# ~15%-of-frame edge, not a uniform shift -- widening this is the direct test
+# of "unstable hard-shadow edge" as the cause (docs/PLAN.md Phase 3b).
+DISTANT_LIGHT_ANGLE_DEG = 3.0
+
 BASE_LIGHT_WARMTH_K = 5500.0
 PERTURBED_LIGHT_WARMTH_K = 3200.0
 LIGHT_WARMTH_READBACK_ATOL = 1e-3
@@ -300,7 +307,14 @@ def build_rig(args: argparse.Namespace) -> Rig:
     ground_cfg = sim_utils.GroundPlaneCfg()
     ground_cfg.func(GROUND_PATH, ground_cfg)
 
-    light_cfg = sim_utils.DistantLightCfg(intensity=BASE_LIGHT_INTENSITY, color=(1.0, 1.0, 1.0))
+    try:
+        light_cfg = sim_utils.DistantLightCfg(
+            intensity=BASE_LIGHT_INTENSITY, color=(1.0, 1.0, 1.0), angle=DISTANT_LIGHT_ANGLE_DEG
+        )
+        notes["light_angle_deg"] = DISTANT_LIGHT_ANGLE_DEG
+    except TypeError as exc:
+        light_cfg = sim_utils.DistantLightCfg(intensity=BASE_LIGHT_INTENSITY, color=(1.0, 1.0, 1.0))
+        notes["light_angle_deg"] = f"unavailable, defaulted: {type(exc).__name__}: {exc}"
     light_cfg.func(LIGHT_PATH, light_cfg)
 
     cube_translation = (*CUBE_TRANSLATION_XY, 0.5 * BASE_CUBE_EDGE_M)
