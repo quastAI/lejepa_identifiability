@@ -977,10 +977,11 @@ def main() -> int:
                 "settings": preset_settings,
             }
             if not facts["all_responsive"]:
-                blind = [k for k, v in facts["responses"].items() if not v["responsive"]]
+                blind = {k: v for k, v in facts["responses"].items() if not v["responsive"]}
                 raise CheckFailed(
-                    f"render does not respond to {blind} above the noise floor -- "
-                    "a stale frame satisfies every other check in this table"
+                    f"render does not respond to {list(blind)} above the noise floor "
+                    f"(noise_floor_mad={floor:.4g}, min_ratio={facts['min_ratio']:g}); "
+                    f"details {blind} -- a stale frame satisfies every other check in this table"
                 )
             return facts
 
