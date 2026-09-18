@@ -142,6 +142,9 @@ def write_latent_state(rig: Rig, spec: LatentSpec, phi: Tensor) -> None:
     _aim_camera(rig, jitter_xy=(dx, dy))
 
     rig.scene.write_data_to_sim()
+    rig.sim.forward()  # flush USD/Fabric, no time advance (README §4.5) --
+    # the renderer reads transforms from Fabric; without this the rendered
+    # image never picks up the write even though `.data.*` read-back does.
 
 
 def read_latent_state(rig: Rig, spec: LatentSpec) -> Tensor:
