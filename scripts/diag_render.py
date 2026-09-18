@@ -64,7 +64,8 @@ for name, z in cases.items():
     drift = (after - before).abs().max().item()
     print(f"DRIFT_{name}", drift, flush=True)
     print(f"READ_{name}_after_step", after, flush=True)
-    backend.render(0)  # discarded settle render
+    for _ in range(7):  # extra discarded settle renders (material recompile?)
+        backend.render(0)
     frames[name] = backend.render(1)["cam0"]["rgb"].clone()
 
 base_frame = frames["base"].float()
