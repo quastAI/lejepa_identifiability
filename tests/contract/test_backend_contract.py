@@ -101,6 +101,30 @@ def test_distinct_states_do_not_render_identically(backend: SceneBackend, group_
     assert not torch.equal(frame_a, frame_b)
 
 
+def test_base_knobs_are_all_sensitive(backend: SceneBackend, group_spec: LatentSpec):
+    """Closes a real gap Phase 4's fifth pod run opened: in a mixed group
+    (`full`/`base+style`/`full+style`), `test_distinct_states_do_not_render_
+    identically` could pass on the `full`/`style` dims' signal alone while
+    every `base` dim (arm/cube) stayed completely disconnected underneath,
+    undetected -- which is exactly what happened before that pod run's fix.
+    Same per-dimension discipline `test_style_knobs_are_all_sensitive`
+    already applies to `style`, applied to `base` in every group config."""
+    base_dims = group_spec.dims("base")
+    assert base_dims, "every group config activates base -- this should never skip"
+
+    backend.bind(group_spec)
+    capture = _capture(backend)
+    base = _mid_phi(group_spec)
+    perturbations = {}
+    for dim in base_dims:
+        handle = group_spec.handles[dim]
+        phi = base.clone()
+        phi[0, dim] = handle.center + 0.8 * handle.radius
+        perturbations[handle.role] = phi
+
+    style_sensitivity_gate(capture, base, perturbations, noise_floor=0.0)
+
+
 def test_style_knobs_are_all_sensitive(backend: SceneBackend, group_spec: LatentSpec):
     """README §7.5/§10.1: a disconnected `style` write must not pass unnoticed
     in *any* group configuration that activates `style`."""
