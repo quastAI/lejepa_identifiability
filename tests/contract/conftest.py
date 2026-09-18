@@ -50,6 +50,24 @@ def _simulation_app() -> Iterator[None]:
     app.close()
 
 
+@pytest.fixture(scope="session")
+def _isaac_backend(_simulation_app: None) -> SceneBackend:
+    """Built once per session and shared across every `isaac`-marked test.
+
+    **Confirmed on the pod:** a function-scoped `IsaacSceneBackend()` --
+    building a fresh `InteractiveScene` per test -- either collides with the
+    prims the first one already spawned on the same live stage, or violates
+    `SimulationContext` being a one-per-process object the same way
+    `SimulationApp` is (README §4.2). The process died with no clean
+    traceback after the first test's scene build succeeded. `bind()` on the
+    shared instance is cheap and side-effect-free, so re-binding a different
+    `group_spec` per test on the *same* scene is the correct level of reuse.
+    """
+    from idtb.sim import IsaacSceneBackend
+
+    return IsaacSceneBackend()
+
+
 @pytest.fixture(
     params=[
         "mock",
@@ -59,12 +77,11 @@ def _simulation_app() -> Iterator[None]:
 def backend(request: pytest.FixtureRequest) -> Iterator[SceneBackend]:
     if request.param == "mock":
         made: SceneBackend = MockSceneBackend()
+        yield made
+        made.close()
     else:
-        # Lazily pulls in `_simulation_app` only for this branch, so a local
+        # Lazily pulls in `_isaac_backend` only for this branch, so a local
         # `pytest` run (which deselects `isaac`) never has to boot Isaac.
-        request.getfixturevalue("_simulation_app")
-        from idtb.sim import IsaacSceneBackend
-
-        made = IsaacSceneBackend()
-    yield made
-    made.close()
+        # Shared, session-scoped -- never closed per test (see
+        # `_isaac_backend`'s docstring for why).
+        yield request.getfixturevalue("_isaac_backend")

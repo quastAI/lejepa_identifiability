@@ -261,6 +261,15 @@ class IsaacSceneBackend:
     Must be constructed after `idtb.sim.app.launch()` has booted
     `SimulationApp` in this process (README §4.2) -- this class's own
     imports are all lazy, but that boot is the caller's responsibility.
+
+    **At most once per `SimulationApp` process.** Confirmed on the pod: a
+    second instance builds a second `InteractiveScene`/`SimulationContext`
+    against the same live stage, which either collides with the prims the
+    first one already spawned or violates `SimulationContext` being a
+    process-singleton the same way `SimulationApp` is -- the process died
+    with no catchable Python exception. Callers that need many samples from
+    one bound spec should construct this once and call `bind()`/`write_state()`
+    repeatedly, not construct a new instance per sample or per test.
     """
 
     def __init__(self, *, resolution: tuple[int, int] = (128, 128), device: str = "cuda:0") -> None:
