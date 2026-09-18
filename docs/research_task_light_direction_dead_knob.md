@@ -55,11 +55,17 @@ still works**: intensity and colour-temperature changes render correctly and
 pass a strict bitwise-determinism gate in the same run. Only the rotation
 (`UsdGeom.XformOp.TypeRotateXYZ`) is affected.
 
-A currently-running diagnostic destroys and recreates the light prim from
-scratch before each rotation write (instead of mutating the existing prim's
-xform op in place), to test whether this is a stale per-light acceleration
-structure or shadow cache keyed to prim identity rather than the transform
-value. Result not yet known when this doc was written.
+**Also ruled out:** destroying and recreating the light prim from scratch
+immediately before each rotation write (instead of mutating the existing
+prim's xform op in place) — testing whether this was a stale per-light
+acceleration structure or shadow cache keyed to prim identity. Result:
+**still exactly `0.0`**, under `/rtx/resetPtAccumOnAnimTimeChange=True`. A
+brand-new prim, rotated before its first-ever render, is indistinguishable
+from the same prim at a different rotation. This points away from anything
+tied to the prim's *history* and toward the render config simply not
+sampling the light's transform for shading at all — a baked/default
+direction, a position-only light model, or a per-scene-topology cache that a
+same-type prim swap doesn't invalidate.
 
 ## Research questions
 
@@ -68,12 +74,13 @@ value. Result not yet known when this doc was written.
    inputs) is cached, baked at first use, or only re-evaluated on some event
    *other than* a per-frame Hydra sync — under either `/rtx/rendermode=Minimal`
    or with `/rtx/resetPtAccumOnAnimTimeChange=True` set?
-2. Is there a separate acceleration structure or light-sampling data structure
-   (e.g. a light BVH/TLAS instance, a shadow-map cache, an IES/direction
-   lookup table) that needs its own explicit invalidation call, distinct from
-   the general accumulation-reset (`resetPtAccumOnAnimTimeChange`) or
-   scene-state-cadence (`RenderContext.reset_transform_cadence()`) mechanisms
-   we've already tried and which had no effect here?
+2. Given a *brand-new* light prim (destroyed and recreated immediately before
+   its first render) shows the identical zero effect, this is not a
+   history-dependent or identity-keyed cache. Is there a known code path where
+   `Minimal` mode or `resetPtAccumOnAnimTimeChange` shading ignores a
+   `UsdLux.DistantLight`'s authored transform entirely — e.g. sampling only a
+   default/world-up direction, or a per-scene-topology light setup that a
+   same-type prim swap doesn't invalidate?
 3. Does Hydra/RTX treat a rotation (`TypeRotateXYZ`) op differently from a
    scale op or a shader-parameter change, specifically for `UsdLux` light
    prims, under these two render configs?
