@@ -126,7 +126,7 @@ def build_rig(*, resolution: tuple[int, int] = (128, 128), device: str = "cuda:0
     """Build the single-env scene `IsaacSceneBackend` operates on."""
     import isaaclab.sim as sim_utils
     import omni.usd
-    from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+    from isaaclab.assets import AssetBaseCfg
     from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
     from isaaclab.sensors import CameraCfg
     from isaaclab.sim import RenderCfg, SimulationCfg, SimulationContext
@@ -149,18 +149,26 @@ def build_rig(*, resolution: tuple[int, int] = (128, 128), device: str = "cuda:0
             ),
         )
         robot = franka_cfg.replace(prim_path=_ROBOT_PATH)
-        cube = RigidObjectCfg(
+        # AssetBaseCfg, not RigidObjectCfg -- confirmed on the pod (and via
+        # Omniverse's own Fabric docs: once Fabric ever publishes a local/
+        # world transform for a prim, OmniHydra permanently ignores that
+        # prim's USD-authored transform from then on). A `RigidObjectCfg`
+        # stays a real PhysX actor even after we stop calling
+        # `write_root_pose_to_sim` on it -- PhysX's own step loop can still
+        # autonomously publish its transform into Fabric during the arm's
+        # `sim.step()` calls, silently hijacking rendering for this prim the
+        # first time that happens. Removing it from PhysX's simulation
+        # entirely (matching `table`, already `AssetBaseCfg`) leaves nothing
+        # for PhysX to ever publish, so the USD translate op in
+        # `writer.py::_write_cube_position` stays the only source of truth.
+        cube = AssetBaseCfg(
             prim_path=_CUBE_PATH,
             spawn=sim_utils.CuboidCfg(
                 size=(_DEFAULT_CUBE_EDGE_M,) * 3,
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.85, 0.13, 0.11)),
                 semantic_tags=[("class", "cube")],
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(*_CUBE_XY, 0.5 * _DEFAULT_CUBE_EDGE_M)
-            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(*_CUBE_XY, 0.5 * _DEFAULT_CUBE_EDGE_M)),
         )
         table = AssetBaseCfg(
             prim_path=_TABLE_PATH,
@@ -203,9 +211,8 @@ def build_rig(*, resolution: tuple[int, int] = (128, 128), device: str = "cuda:0
     # Built from our own path templates directly, not from `scene["table"].cfg`
     # -- confirmed on the pod that `scene[...]` indexing returns a bare
     # `FabricFrameView` (no `.cfg` attribute) for a purely static `AssetBaseCfg`
-    # entry like the table, unlike the `RigidObjectCfg`-backed cube. Using the
-    # templates we already hold avoids depending on that asset-type distinction
-    # at all.
+    # entry, which both the table and the cube now are. Using the templates
+    # we already hold avoids depending on `scene[...]` at all.
     env0 = "/World/envs/env_0"
     stage = omni.usd.get_context().get_stage()
     cube_prim = stage.GetPrimAtPath(_CUBE_PATH.replace("{ENV_REGEX_NS}", env0))
