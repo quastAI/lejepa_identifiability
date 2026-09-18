@@ -771,6 +771,8 @@ def _find_or_add_xform_op(prim: Any, op_type: Any) -> Any:
         return xformable.AddScaleOp()
     if op_type == UsdGeom.XformOp.TypeRotateXYZ:
         return xformable.AddRotateXYZOp()
+    if op_type == UsdGeom.XformOp.TypeOrient:
+        return xformable.AddOrientOp()
     raise ValueError(f"no add-op helper wired up for {op_type!r}")
 
 
@@ -818,19 +820,40 @@ def write_light_direction(
     """Rotate the key light so its emission direction matches (azimuth, elevation).
 
     A ``UsdLux`` distant/directional light emits along its local ``-Z``; the
-    rotation is built as "take -Z to the wanted direction" and decomposed into
-    the XYZ Euler angles a rotateXYZ op wants. The decomposition's angle
-    *order* is the one part of this file worth a visual sanity check on the
-    pod (does the shadow actually move where azimuth/elevation say it should)
-    rather than trusting the math alone.
+    rotation is built as "take -Z to the wanted direction" and set directly as
+    a quaternion (``TypeOrient``) -- **not** decomposed into XYZ Euler angles.
+
+    This replaces an earlier version that went through
+    ``Gf.Rotation.Decompose(XAxis, YAxis, ZAxis)`` into a ``TypeRotateXYZ`` op.
+    That was a real, confirmed bug, not a hypothetical one: external research
+    (docs/research_task_light_direction_dead_knob.md) flagged
+    ``Decompose``'s angle order as not necessarily matching ``TypeRotateXYZ``'s
+    application order, and read-back evidence on the pod confirmed it exactly
+    -- writing (azimuth=120°, elevation=55°) read back as roughly
+    (azimuth=9°, elevation=55°): elevation round-tripped exactly, azimuth was
+    scrambled. That's almost certainly why README §7.5's `light_direction`
+    "dead knob" was never actually about renderer determinism at all -- the
+    real perturbation was much smaller than the intended one, small enough to
+    sit at or below whatever noise floor happened to be measuring it. A
+    quaternion has no axis-order ambiguity to get wrong: ``ComputeLocalToWorldTransform``
+    reading back a `TypeOrient` op is mathematically guaranteed to reproduce
+    the exact rotation that was set, by construction.
     """
     from pxr import Gf, UsdGeom
 
     direction = azel_to_direction(azimuth_rad, elevation_rad)
     rotation = Gf.Rotation(Gf.Vec3d(0, 0, -1), Gf.Vec3d(*direction))
-    euler_deg = rotation.Decompose(Gf.Vec3d.XAxis(), Gf.Vec3d.YAxis(), Gf.Vec3d.ZAxis())
-    op = _find_or_add_xform_op(rig.light_prim, UsdGeom.XformOp.TypeRotateXYZ)
-    op.Set(Gf.Vec3f(euler_deg[0], euler_deg[1], euler_deg[2]))
+    quat = rotation.GetQuat()
+    op = _find_or_add_xform_op(rig.light_prim, UsdGeom.XformOp.TypeOrient)
+    # Precision of an authored `orient` op can be float or double depending on
+    # how it was added -- "resolve, don't guess" (README §7.5) applies here
+    # too, cheaply, rather than assuming AddOrientOp()'s default forever.
+    try_candidates(
+        [
+            ("Quatf", lambda: op.Set(Gf.Quatf(quat))),
+            ("Quatd", lambda: op.Set(Gf.Quatd(quat))),
+        ]
+    )
     return direction
 
 
