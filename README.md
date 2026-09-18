@@ -87,9 +87,9 @@ The purpose of this section is to keep the plan honest about the difference betw
 |---|---|---|
 | **Dataset storage format** (HDF5 / WebDataset / other) | Write behind a small writer interface; decide once the per-sample payload size and the training-side read pattern are known. | Phase 5 |
 | **Image resolution** | Candidates 128×128 and 224×224. Cheap to ablate; treat as an experimental variable rather than a configuration decision. | Phase 8 |
-| ~~Which `full`/`style` knobs are writable at all, and through which API call~~ | **Resolved, §7.5.** `cube.size` is writable and bitwise-deterministic. `cube.hue`, `light.*`, `cam.jitter` are writable but **not** bitwise-deterministic under `standard` — root cause open, blocking them as first-class latents (§11). | — |
-| **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the rest are moot until §7.5's determinism blocker is resolved. | Phase 3 / Phase 2 |
-| ~~Whether `exposure` has a usable lever at all~~ | **Resolved, §7.5.** Three carb keys accepted and measured to move pixels — but shows the same non-determinism as `light.*`/`cam.jitter`, so the same blocker applies. | — |
+| ~~Which `full`/`style` knobs are writable at all, and through which API call~~ | **Resolved, §7.5.** `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter` are all writable and bitwise-deterministic under the revised `standard` (adds `resetPtAccumOnAnimTimeChange=True`). `light.azimuth_elevation` is writable (confirmed exact via read-back) but has no measurable effect on the render in any tested config — blocked, scoped to this spike scene's `DistantLight`, re-test against scene v1's light rig before deciding its fate (§11). | — |
+| **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the determinism blocker (§7.5) is resolved for every handle except `light.azimuth_elevation`, so this is open work now, not blocked work. | Phase 3 / Phase 2 |
+| ~~Whether `exposure` has a usable lever at all~~ | **Resolved, §7.5.** Three carb keys accepted and measured to move pixels, and bitwise-deterministic under the revised `standard`. | — |
 
 The four Spike questions that used to live in this table (render mode/preset, physics-step requirement, accumulation depth N, `TiledCamera` vs. `Camera`) are all answered — moved to §3.1, §7.2.
 
@@ -265,7 +265,7 @@ lejepa_identifiability/
 │   └── analysis/                    # LeJEPA training · metrics
 ├── spikes/
 │   ├── spike_api.py                 # physics-state writes, 4 spikes    ✅ built
-│   └── spike_dynamic_attrs.py       # attribute writes: full + style ✅ written, ⬜ unrun
+│   └── spike_dynamic_attrs.py       # attribute writes: full + style ✅ resolved (§7.5)
 ├── tests/
 │   ├── test_ou.py, test_spec.py     # tier 0 — pure                  ✅ built
 │   ├── test_import_guard.py         # tier 0 — §4.2 enforced         ✅ built
@@ -766,7 +766,7 @@ Spikes 1 and 3 (§7.2) returned. `standard` is now a real, measured carb configu
 | Preset | Intent | Setting | Status |
 |---|---|---|---|
 | `debug` | Fastest thing that renders a recognisable image. Scene authoring, camera placement, smoke tests. Determinism not required. | Whatever is cheapest that works — the as-booted default (`RealTimePathTracing`) is fine here precisely *because* this preset doesn't need to pass §7.1 | Candidate, unchanged |
-| **`standard`** | Main dataset generation: provably deterministic at tractable cost. | **`/rtx/rendermode=PathTracing`, `/rtx/pathtracing/spp=1`, `/rtx/pathtracing/totalSpp=64`, `/rtx/pathtracing/optixDenoiser/enabled=0`** | **Measured, §7.2 Spike 1+3.** `order_independent_bitwise`/`back_to_back_bitwise` both `true`; converges inside a single external render call (N is the `totalSpp` setting, not a loop count) |
+| **`standard`** | Main dataset generation: provably deterministic at tractable cost. | **`/rtx/rendermode=PathTracing`, `/rtx/pathtracing/spp=1`, `/rtx/pathtracing/totalSpp=64`, `/rtx/pathtracing/optixDenoiser/enabled=0`, `/rtx/resetPtAccumOnAnimTimeChange=True`** | **Measured, §7.2 Spike 1+3, §7.5 Spike 5 round 2.** `order_independent_bitwise`/`back_to_back_bitwise` both `true` for `base` (Spike 1) and for `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter` (Spike 5); converges inside a single external render call. The fifth key is new — see §7.5, it's what fixed everything except `light.azimuth_elevation`. |
 | `photoreal` | Headline figures and a smaller high-fidelity dataset for the realism ablation. | Candidate: same recipe as `standard` (`PathTracing`, denoiser off) with a higher `totalSpp` for finer detail — not yet spiked | Open — needs its own convergence + determinism check at the higher SPP, on scene v1 (§7.4's known-limit warning applies: `standard`'s numbers were measured on the spike scene, not scene v1) |
 
 **What was ruled out, measured, not assumed:** the as-booted default (`RealTimePathTracing`) is not deterministic — `order_independent_mad ≈ 48` per 128×128 uint8 frame, unaffected by rendering more samples. Every preset intended for dataset generation must pass §7.1's bitwise gate; only the explicit `PathTracing`+denoiser-off recipe above does, on this Isaac build.
@@ -796,82 +796,89 @@ jittered ad hoc inside the scene setup.
 - **Camera:** fixed intrinsics, high oblique angle, 2–3 views per §5.3. Intrinsics logged to dataset metadata and **held constant**; extrinsics carry a small `style` jitter about the nominal pose, bounded so §5.3's occlusion geometry is not substantially changed.
 - **Categorical factors stay out of *z*:** room swaps and discrete material choices are not squashable Gaussians (§5.2.3's box) and run as cross-dataset ablations instead.
 
-### 7.5 Spike 5 — the attribute write paths (`full` and `style`): `cube.size` clean, everything else blocked
+### 7.5 Spike 5 — the attribute write paths (`full` and `style`): resolved, one latent still blocked
 
-`spikes/spike_dynamic_attrs.py` (docs/PLAN.md Phase 3b) ran Spikes 1–4's
+`spikes/spike_dynamic_attrs.py` (docs/PLAN.md Phase 3b/3c) ran Spikes 1–4's
 three-question recipe (does the write land, does it move pixels, is it still
 bitwise deterministic under `standard`) against every `full`/`style` write path:
 a geometry write for `cube.size`, a USD material write for `cube.hue`, light
 attributes for `light.*`, a per-capture camera re-aim for `cam.jitter.*`, and a
-post-process setting for `exposure`.
+post-process setting for `exposure`. First pass: only `cube.size` was clean;
+`cube.hue`, `light.intensity`, `light.warmth`, `light.azimuth_elevation`, and
+`cam.jitter` all showed a small (~1.7–2.6/255) but exactly reproducible
+back-to-back difference, and four targeted fixes (render depth, a warm-up
+render, preset-application frequency, wider light angular size) were each
+tried and cleanly falsified.
 
-**`cube.size` (geometry, `full`): bitwise-deterministic**, same standard as
-Spikes 1–2. **`cube.hue`, `light.intensity`, `light.warmth`,
-`light.azimuth_elevation`, `cam.jitter`: not bitwise-deterministic.** Two
-back-to-back captures of the *identical* value differ by a small (~1.7–2.6/255)
-but exactly reproducible amount (identical to 3+ decimals across separate
-process runs — not driver flakiness), localized (`--save-frames`) to ~15% of the
-frame on the varied object's own rendered surface, not a uniform shift or a
-background/shadow-edge artefact. `exposure` has a real, working lever (three carb
-keys measured to move pixels) but shows the same non-determinism.
+**Resolved: `standard` now includes `/rtx/resetPtAccumOnAnimTimeChange=True`.**
+An external research pass (`docs/answer.md`, then a follow-up round —
+`docs/research_task_light_direction_dead_knob.md`) and a systematic sweep of
+docs/PLAN.md Phase 3c's experiments (A–I, detailed there) converged on this
+single extra carb key. With it, `cube.hue`, `light.intensity`, `light.warmth`,
+and `cam.jitter` are all bitwise-deterministic **and** correctly responsive,
+`cube.size` stays clean, and nothing about `base`, render mode, or fidelity
+changes — it's one additional setting on top of the same `PathTracing` recipe,
+not a mode swap. Two genuinely rejected alternatives, kept here so they aren't
+retried: Isaac Lab's own built-in `RealTimePathTracing`+RTPT-caches-off recipe
+made everything worse (real, nonzero noise, 0.04–0.26); `--extra-preset
+minimal` reached the same 14/16 result but has its own, separate weakness —
+`mesh_rotation_control` measured it barely responding to a 10° geometry tilt
+(`mad = 0.016`, vs `9.11` under `standard`), a general shading-fidelity problem
+unrelated to the light-direction issue below, and enough reason on its own to
+prefer `resetPtAccumOnAnimTimeChange` over switching render modes.
 
-Four targeted fixes were each tried and cleanly falsified: raising render calls
-per capture 1→8, discarding a warm-up render before the measured one (regressed
-the previously-clean `cube.size`), applying the preset once at scene build
-instead of per-check, and widening the key light's angular size. None moved the
-affected checks in a consistent direction. **Root cause not identified.**
+**Still blocked: `light.azimuth_elevation` — confirmed structural, not a
+render-config problem.** Investigating it surfaced a real, independent bug:
+`write_light_direction` built the rotation as a `Gf.Rotation`, decomposed it
+into XYZ Euler angles, and set those on a `TypeRotateXYZ` op — and the
+decomposition's angle order didn't match `TypeRotateXYZ`'s application order.
+Read-back proof: writing (azimuth=120°, elevation=55°) read back as roughly
+(azimuth=9°, elevation=55°) — elevation exact, azimuth scrambled. Fixed by
+switching to a quaternion (`TypeOrient`) op, which has no axis-order ambiguity
+by construction; read-back error is now `1.7×10⁻¹⁶` (machine precision).
+**Fixing it changed nothing about the render.** With a mathematically verified,
+large rotation now actually reaching USD, the rendered image is still bitwise
+*identical* between the two orientations — confirmed under `standard`,
+`resetPtAccumOnAnimTimeChange`, `--extra-preset minimal`,
+`--disable-fabric-transform-sync`, and a full light-prim respawn before every
+write. Meanwhile `light.intensity`/`light.warmth` (scalar attributes on the
+*same* prim) and a control rotation on the ground plane (a mesh, not a light)
+all respond correctly under the identical configs. Seven specific mechanisms
+are now falsified — caches, AA jitter, RTPT's own cache namespace, forced
+accumulation reset, `Minimal` mode, Fabric-vs-USD transform sourcing, and
+prim-identity/history-dependent caching (a full respawn changes nothing). The
+working theory is that this exact `UsdLux.DistantLight`'s orientation simply
+isn't consumed by whatever shading path Isaac's PathTracing implementation
+uses here, independent of any carb setting reachable from outside the renderer.
 
-**Consequence:** on this exact pod/driver, `base` and `cube.size` meet §7.1's
-bitwise gate — Phase 4's `base`-only pipeline is unaffected. `full` beyond
-`cube.size`, and every tested `style` dimension, do **not** — generating data
-with them now would inject exactly the confound the determinism gate exists to
-catch. This blocks the `full`/`style` extension (§11 Risk Register) until the
-cause is found or a different render configuration is verified clean.
+**This is being carried forward, not dropped.** §7.4 already plans to replace
+this single `DistantLight` with an HDRI dome plus area lights for scene v1 —
+a different light type, very likely a different code path for how "direction"
+reaches the renderer. Dropping `light.azimuth_elevation` now, permanently,
+would remove the single most salient style-invariance test the project has
+(shadow direction) on the strength of a result that may be entirely specific
+to a light type scene v1 doesn't even use. Instead: **`light.azimuth_elevation`
+stays an open, scoped item** — blocked on this spike scene's `DistantLight`,
+explicitly re-tested against scene v1's actual light rig before either
+including or excluding it as a `style` latent (docs/PLAN.md Phase 3c has the
+checklist item). The three-question recipe (`run_knob_check`) that found this
+is written once, reusably, for exactly this reason.
 
-**Round 2, code written, not yet run on the pod — a new, more specific lead.**
-`docs/answer.md` (external research reply to
-`docs/research_task_full_style_determinism.md`) proposes that the residual is
-the path tracer's **cross-frame caches and AA jitter**, not sample count —
-`/rtx/pathtracing/cached/enabled`, `/rtx/pathtracing/lightcache/cached/enabled`,
-and adaptive sampling all default *on* and were never touched by the four
-fixes above, and `RenderCfg(antialiasing_mode="Off")` is an Isaac Lab
-**Real-Time**-mode call that does nothing under `PathTracing`, where AA is a
-separate jittered pixel filter — confirmed by reading Isaac Lab's own source
-(`isaac_rtx_renderer_utils._apply_isaac_rtx_global_settings`), not just
-inferred. Two of the already-falsified results are consistent with this
-theory rather than unexplained by it (docs/PLAN.md Phase 3c has the detail).
-It also names a version-matched candidate root cause,
-[IsaacLab#6609](https://github.com/isaac-sim/IsaacLab/issues/6609), filed
-against our exact `beta2.patch1` release: renderer scene-state publishes at
-most once per physics-step count, and our capture loop calls `sim.forward()`
-with **zero** `sim.step()` calls by design (§5.5) — exactly the regime that
-issue reports as able to skip publication; its fix,
-`render_context.reset_transform_cadence()`, is confirmed public on our exact
-release from the issue text itself.
-
-Writing the code to test this turned up a second, independent lead docs/answer.md
-had no way to see: **Isaac Lab ships its own built-in "deterministic
-rendering" recipe**, `isaac_rtx_renderer_utils.apply_isaac_rtx_determinism_settings()`
-— `RealTimePathTracing` with a *different* cache namespace
-(`/rtx/rtpt/cached/enabled`, `/rtx/rtpt/lightcache/cached/enabled`) disabled.
-Spike 1 measured as-booted `RealTimePathTracing` non-deterministic, but never
-with these two caches off — a real, shipped, untested combination, not a
-guess.
-
-All four experiments (`spikes/spike_dynamic_attrs.py`'s `--extra-preset`,
-`--reset-pt-accum-on-time-change`, `--reset-cadence-per-capture`,
-`--capture-via` flags, plus an always-on RenderProduct-attribute audit) are
-now implemented and unit-tested (118/118 pure-layer tests green locally,
-docs/PLAN.md Phase 3c) — **this does not make the spike green by itself; it
-gives a specific next pod session a real chance to.** One concern the reply
-raised (that `cube.size`'s clean result could be a Fabric-override no-op)
-does not apply here: `run_knob_check` already gates every knob, `cube.size`
-included, on `sensitivity_report` before the determinism check runs, so a
-no-op could not have reported clean.
+**Two infrastructure bugs found and fixed along the way, independent of the
+render question:**
+- `spike_api.CheckFailed` discarded whatever facts a check had already
+  computed when it raised — `Report.run()` only attached `facts` on the PASS
+  path, so **every failing check in every Spike 1 and Spike 5 run had been
+  silently losing its diagnostic numbers**, recoverable only from whatever fit
+  in the printed message text. Fixed at the source: `CheckFailed` now carries
+  its facts through to the `CheckResult`, covered by two new tests. This is
+  what made `light.azimuth_elevation`'s actual sensitivity/determinism numbers
+  visible at all partway through this investigation.
+- The Euler-decomposition bug above (`write_light_direction`).
 
 Motion blur is a **separate, expected, understood FAIL**: blur implies motion
-over time and this pipeline has none by design (§5.5) — a completed check, same
-category as Spike 1's aliasing FAIL, not part of the blocker above.
+over time and this pipeline has none by design (§5.5) — a completed check,
+same category as Spike 1's aliasing FAIL.
 
 
 ## 8. Infrastructure
@@ -1154,7 +1161,7 @@ Mechanics:
 | Occlusion makes g non-injective; results look like encoder failure | High | Multi-view cameras, high oblique placement, per-sample visibility logging, injectivity proxy check. |
 | Cube rotational symmetry hides a latent dimension | High | Omit yaw from `base`; switch to a visually asymmetric object before introducing orientation latents (§5.2.1). |
 | A `style` knob is silently disconnected, so invariance is measured for free | High | **New with the group design.** A write that lands but changes no pixels is indistinguishable from a perfectly invariant encoder in every downstream metric. Mitigated by §7.5's per-knob sensitivity check, ranked above determinism, and by §10.1's style-sensitivity gate running on generated data, not only in the spike. |
-| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | Critical | **Confirmed, not just anticipated.** Spike 5 (§7.5) measured `cube.hue`/`light.*`/`cam.jitter`/`exposure` failing §7.1's bitwise gate at a small (~1.7–2.6/255), fully reproducible magnitude; `cube.size` alone is clean. Four targeted fixes (render depth, warm-up render, preset-application frequency, light angular size) were each tried and falsified. **A new, more specific lead has code written but no pod run yet** (§7.5 "Round 2", docs/PLAN.md Phase 3c): path-tracer caches + AA jitter never disabled, a version-matched IsaacLab#6609 match to our zero-`sim.step()` capture loop, and Isaac Lab's own built-in `RealTimePathTracing`+RTPT-caches-off recipe. Blocks `full` beyond `cube.size` and all of `style` until one of those experiments lands clean, or the fallback linear-probe criterion (Phase 3c) is adopted instead — does not block the `base`-only pipeline. |
+| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | **Resolved for `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter`; Medium, open, scoped for `light.azimuth_elevation`** | **Fixed.** Adding `/rtx/resetPtAccumOnAnimTimeChange=True` to `standard` (§7.5) made every attribute except light rotation bitwise-deterministic and correctly responsive, with no mode change and no cost to `base`. `light.azimuth_elevation` remains blocked after seven falsified render-config hypotheses and a confirmed, fixed write bug (Euler-decomposition axis order) — evidence now points to this specific `DistantLight`'s orientation not being consumed by the shading path at all, independent of any carb setting. Not dropped: scene v1 replaces this light type entirely (§7.4), so this is carried forward as an explicit re-test item against the real light rig, not a closed question. |
 | ρ_style = 0 breaks App. F's isotropy condition | Medium | §5.4.1 argues the break is in the benign direction — an infinitely fast dimension leaves the top of the spectrum rather than interleaving into it — but that is *our* reading, not the paper's. Treated as a falsifiable prediction: `R²(h → z_style) ≈ 0` is measured in every run, and the ρ_style sweep (§9 Phase 8) tests the predicted crossing at ρ_task². If style latents prove linearly decodable, the group split is wrong and gets rethought, not patched. |
 | `cube.size` confounds with camera distance under a single view | Medium | A larger cube further away renders near-identically to a smaller one nearer — non-injectivity of the same kind as §5.3's occlusion, introduced by the `full` group. Mitigated by the 2–3 cameras §5.3 already prescribes, and by keeping the size radius small relative to the depth range; the injectivity proxy in §10.1 is what would catch it. |
 | Bounded joints break Gaussianity of z | High | Absorbed tanh squash (§5.1). Never clip, never wrap. |
@@ -1182,9 +1189,9 @@ Two tracks, and they are independent.
 5. ~~Get the fixed `infra/bootstrap.sh` onto the pod and run it.~~ **Done** — it now finishes clean: every `$HOME` cache relocated, and `/isaac-sim/kit` reported as a `NOTE` (root-owned, unreachable from inside this container, accepted — §8.3) rather than a failure. No custom image; a rebuild for one `chown` + `ENTRYPOINT []` was considered and declined for the same reason §3.4.1 declined re-provisioning.
 6. ~~Restart the pod once and confirm Isaac does not re-download assets.~~ **Done, properly — the pod was deleted and recreated, not just restarted.** A same-container restart wouldn't prove anything: the container's own ephemeral layer survives a restart regardless of whether relocation worked. The delete+recreate landed on a genuinely new container, and `bootstrap.sh` correctly re-created the `$HOME` symlinks from scratch (not `already linked` — that phrasing only applies to a same-container restart) pointing at the same `/idtb/cache/*` content as before. `preflight.sh` and `bootstrap.sh` both re-ran clean on the new pod, confirming both are safe to re-run on a fresh container, not just idempotent within one.
 7. ~~Run a shipped Isaac Lab tutorial headless, before running any of our code.~~ **Done — `create_empty.py --headless` completed (`[INFO]: Setup complete...`) on driver 580.159.04**, the first direct evidence against a driver-mismatch crash (§3.4.1's residual risk). **No PNG was produced** — this tutorial is scene composition, not rendering; the "look at the PNG" framing assumed the wrong tutorial. A real visual/rendering check is folded into Spike 1 (§7.2, "Render non-degenerate") rather than repeated here. One non-fatal oddity worth watching: Kit's `OmniHub` helper failed to launch and retried ~44 times (~14s) before giving up gracefully — harmless for this asset-free tutorial, but worth attention once a script streams a real Omniverse asset (the Franka, in the spike).
-8. Run Spikes 1–4 (§7.2). Record the answers in §3 and rewrite §7.3 with real preset definitions. This is also where the driver acceptance in §3.4.1 gets its real answer — a clean determinism result on this host is worth more than the driver number.
-8b. **Next pod session: Spike 5 round 2 (§7.5, docs/PLAN.md Phase 3c) — code written, needs a pod run.** `spikes/spike_dynamic_attrs.py` now has four independent, ordered experiments against the `full`/`style` non-determinism, none of which overlap the four already-falsified fixes: an always-on RenderProduct attribute audit, `--extra-preset caches_and_aa_off` (disable path-tracer caches/AA jitter), `--reset-pt-accum-on-time-change`/`--reset-cadence-per-capture`/`--capture-via app_update` (force cold accumulation per capture, IsaacLab#6609), and `--extra-preset {realtime_rtpt_caches_off,minimal}` (two escape-hatch render modes, one of them Isaac Lab's own built-in determinism recipe).
-9. Only then start on `stage_v1_tabletop.usd`.
+8. ~~Run Spikes 1–4 (§7.2).~~ **Done.**
+8b. ~~Spike 5 round 2 (§7.5, docs/PLAN.md Phase 3c).~~ **Done, resolved except one item.** `resetPtAccumOnAnimTimeChange=True` added to `standard` fixed `cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter`. `light.azimuth_elevation` is blocked on this spike scene's `DistantLight` specifically (§7.5) — carried forward as an explicit re-test against scene v1's light rig, not dropped.
+9. Only then start on `stage_v1_tabletop.usd` — and when it exists, re-run `light.azimuth_elevation`'s knob check (or its area-light equivalent) against the real light rig before deciding whether it's a usable `style` latent (§7.5).
 
 **Track B — build what needs no decisions (local, start now):**
 
@@ -1192,7 +1199,7 @@ Two tracks, and they are independent.
 
 1. ~~OU sampler, `LatentSpec`, squash — with tier-0 tests.~~ **Done.** Plus the package scaffolding, the §4.2 import guard as an executable test, and the two pod scripts Track A needs.
 2. ~~`spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast.~~ **Written, run four times, answered (§7.2).**
-3. ~~`spikes/spike_dynamic_attrs.py` — Spike 5, the `full`/`style` attribute write paths.~~ **Written, unrun** (docs/PLAN.md Phase 3b). Reuses `spike_api.py`'s pure layer rather than duplicating it; its own new pure helpers (`try_candidates`, `hue_to_rgb`, `azel_to_direction`, `cube_size_radius_from_aperture`) are covered by `tests/test_spike_dynamic_attrs.py`. Run by Track A.
+3. ~~`spikes/spike_dynamic_attrs.py` — Spike 5, the `full`/`style` attribute write paths.~~ **Done** (docs/PLAN.md Phase 3b/3c). Reuses `spike_api.py`'s pure layer rather than duplicating it; its own new pure helpers (`try_candidates`, `hue_to_rgb`, `azel_to_direction`, `cube_size_radius_from_aperture`) are covered by `tests/test_spike_dynamic_attrs.py`. Resolved everything except `light.azimuth_elevation` (§7.5).
 4. Then, against what both spikes measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.
 
 > ### Closing note on sequencing

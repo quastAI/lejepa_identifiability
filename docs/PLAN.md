@@ -266,14 +266,18 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 
 ---
 
-## Phase 3c — Spike 5 diagnosis, round 2 (external research lead, untested)
+## Phase 3c — Spike 5 diagnosis, round 2 — resolved (one item carried forward)
 
 > `docs/research_task_full_style_determinism.md` was sent out as a research
-> question after the four falsified fixes above; `docs/answer.md` is the reply.
-> **This is a set of new hypotheses and a specific experiment order, not a
-> fix** — nothing below has been run. Per the no-premature-pins rule, none of
-> these carb keys go into `standard` or into code until a pod run confirms
-> them; they're a checklist, not a decision.
+> question after the four falsified fixes above; `docs/answer.md` is the
+> reply. A second, narrower research round followed once
+> `light.azimuth_elevation` turned out not to respond to any of it —
+> `docs/research_task_light_direction_dead_knob.md`. **Outcome:**
+> `resetPtAccumOnAnimTimeChange=True` is now part of `standard` (§7.3), fixing
+> everything except `light.azimuth_elevation`, which is blocked and carried
+> forward rather than dropped (see "Known limit" below). Every experiment's
+> result is recorded against it below, falsified or adopted — nothing here is
+> a live hypothesis anymore.
 
 **What's actually new versus the four already-falsified attempts** (render
 depth 1→8, discard-first warm-up, preset-once-vs-per-check, wider light
@@ -324,76 +328,91 @@ clean verdict.
   fake USD prim / render context — 118/118 tests and `ruff check` green
   locally.
 
-**Next pod session — run in this order** (each falsifies a specific claim
-before spending time on the next; unless noted, run
-`spikes/spike_dynamic_attrs.py` with the given flags added to the existing
-Round-1 invocation):
+**Run on the pod, in order — outcome recorded against each:**
 
-- [ ] 🧑🤖 **A. Audit what's actually configured (~10 min, always on).**
-  `render_product_attribute_audit` runs on every invocation now, no flag
-  needed — it dumps every `omni:rtx:*` attribute on the camera's RenderProduct
-  prim and reports it next to the carb keys `standard` sets. Isaac Sim 6.x's
-  per-product render settings (`omni:rtx:rendermode`,
-  `omni:rtx:pt:samplesPerPixel`, etc.) are a separate mechanism from the
-  global/deprecated carb keys, and reading a carb key back only proves carb
-  stored it — not that the RenderProduct used it. **Falsifies:** "the
-  `standard` preset is actually live on this render path." If it isn't,
-  everything measured under §7.5 needs re-interpreting, not just patching.
-- [ ] 🧑🤖 **B. `--extra-preset caches_and_aa_off`.** Disables every
-  path-tracer cache and stochastic filter under our existing `PathTracing`
-  mode — none tried before: `/rtx/pathtracing/cached/enabled=False`,
-  `/rtx/pathtracing/lightcache/cached/enabled=False`,
-  `/rtx/pathtracing/adaptiveSampling/enabled=False`,
-  `/rtx/pathtracing/fireflyFilter/enabled=False`,
-  `/rtx/pathtracing/aa/op=0`, `/rtx/pathtracing/aa/filterRadius=0.0`. Real
-  keys, confirmed by reading OmniGibson's
-  `renderer_settings/path_tracing_settings.py` (which enumerates Isaac Sim's
-  actual PathTracing settings), not guessed — `adaptiveSampling/enabled` is
-  the one key that source doesn't corroborate, and `apply_carb_settings`'s
-  `accepted` read-back flag is what tells it apart from the rest. Also
-  confirmed independently: `RenderCfg(antialiasing_mode="Off")` calls
-  `rep.settings.set_render_rtx_realtime(...)`
-  (`isaac_rtx_renderer_utils._apply_isaac_rtx_global_settings`) — a
-  **Real-Time**-mode call that does nothing under our `PathTracing` mode,
-  where AA is the separate `/rtx/pathtracing/aa/*` jittered pixel filter.
-  Sub-pixel jitter may have been on this whole time. **Prediction:** the five
-  nonzero `back_to_back_mad` values drop to `0.0` or by an order of magnitude.
-  If none move at all, the cache/AA-jitter theory is dead and C/D are next.
-- [ ] 🧑🤖 **C. Three independent levers, tried alone before combined:**
-  `--reset-pt-accum-on-time-change`, `--reset-cadence-per-capture`, and
-  `--capture-via app_update`. The middle one is the **version-matched lead**:
-  [IsaacLab#6609](https://github.com/isaac-sim/IsaacLab/issues/6609), filed
-  against our exact `beta2.patch1` release, is that `RenderContext` publishes
-  renderer scene state at most once per physics-step count, and a caller that
-  calls `forward()` without advancing that count — precisely §5.5's
-  zero-`sim.step()` capture loop — can skip publication entirely. Its own
-  fix, confirmed from the issue text: `render_context.reset_transform_cadence()`
-  is public on our exact release; `reset_scene_state_cadence()` may not be yet.
-  `resolve_cadence_reset()` tries both and records which one (if either)
-  answered.
-- [ ] 🧑🤖 **D. Two escape-hatch presets if B and C both fail to move the
-  numbers:** `--extra-preset realtime_rtpt_caches_off` (Isaac Lab's own
-  built-in recipe, above — a real, shipped alternative, not our guess) and
-  `--extra-preset minimal` (Isaac's `Minimal` render mode: hard shadows, first
-  distant light only, no Monte Carlo state, no caches, no accumulation; the
-  exact string and per-product attribute name (`omni:rtx:rendermode` /
-  `"Minimal"`) confirmed from `isaaclab_physx.renderers.isaac_rtx_renderer`,
-  applied here as a global carb write for a first cut). Loses little for a
-  128×128 cube-on-plane scene; the material/light/camera knobs still change
-  the image. Either changes `standard` itself, so whichever works needs its
-  own §7.1 gate re-run against `base`, not just the five blocked knobs.
-- [ ] 🤖 **If none of A–D land bitwise-clean:** record a fallback acceptance
-  criterion instead of giving up the render path — render each state twice in
-  shuffled order and test whether a linear probe on `b1 − b2` predicts the
-  varied factor above chance. This is weaker than bitwise equality but matches
-  what §7.1 actually needs (no *information* about the latent in the
-  residual, not literal bit-identity). Record as a Decision Register candidate
-  in README §3.1, not an adopted change — a real decision needs the pod data
-  from A–D first.
-- [ ] 🤖 **README checkpoint 4** — whichever of A–D resolves it (or the
-  fallback criterion, if adopted) gets written into §7.3's `standard` preset,
-  §7.5's verdict, and §11's risk row. If A–D all fail, §7.5 records that too,
-  with the fallback criterion as the new plan of record for `full`/`style`.
+- [x] 🧑🤖 **A. Audit what's actually configured.** `render_product_attribute_audit`
+  confirmed `standard`'s carb keys reach the real per-product config —
+  `omni:rtx:pt:samplesPerPixel: 64` / `samplesPerIteration: 1` matched
+  `totalSpp`/`spp` exactly, and experiment B's cache/AA keys showed up
+  translated but present (`adaptiveSampling:enabled: false`,
+  `pixelFilter:radius: 0.0`). **Closed: carb is authoritative, not a phantom
+  setting.**
+- [x] 🧑🤖 **B. `--extra-preset caches_and_aa_off`.** Real, partial effect —
+  all five affected knobs dropped by a consistent ~30% (`1.877→1.305`,
+  `1.746→1.238`, etc.) — but **regressed `cube.size`** from bitwise-clean to a
+  tiny leak (`0.0004679`) and broke its sensitivity gate. **Not adopted**:
+  a real lever, but not the fix, and it costs the one control that was clean.
+- [x] 🧑🤖 **C. Three independent levers.** `--reset-pt-accum-on-time-change`
+  alone was the winner — fixed `cube.hue`, `light.intensity`, `light.warmth`,
+  `cam.jitter` completely (bitwise-clean **and** correctly responsive), left
+  `cube.size` untouched, all under `standard`'s own `PathTracing` mode, no
+  mode swap. `--reset-cadence-per-capture` (the IsaacLab#6609 lever) was
+  **completely inert** — bit-for-bit identical to doing nothing — almost
+  certainly because this build runs the **PhysX + IsaacRtxRenderer** backend
+  (confirmed from the boot log), not the Newton + OVRTX backend #6609 was
+  filed and fixed against. `--capture-via app_update` **made everything
+  worse** (8 failures vs. 6, broke previously-clean checks) — rejected outright.
+- [x] 🧑🤖 **D. Two escape-hatch presets, tried anyway for the data.**
+  `realtime_rtpt_caches_off` made everything worse (real, nonzero noise
+  everywhere, `0.04`–`0.26`) — rejected. `minimal` reached the same 14/16
+  result as C's winner, but a new control check
+  (`mesh_rotation_control`, added mid-investigation) found it barely
+  responds to a 10° geometry tilt at all (`mad = 0.016` vs. `9.11` under
+  `standard`) — a general shading-fidelity weakness, independent reason to
+  prefer C's `resetPtAccumOnAnimTimeChange` over a mode swap.
+- [x] 🤖 **Fallback linear-probe criterion: not needed.** `standard` +
+  `resetPtAccumOnAnimTimeChange=True` reached bitwise-clean for everything
+  except `light.azimuth_elevation` (below) — the weaker criterion was never
+  invoked.
+- [x] 🤖 **README checkpoint 4 — done.** §7.3's `standard` preset, §7.5's
+  verdict, §11's risk row, and the §3.1/§3.2 Decision Register rows are all
+  updated.
+
+**`light.azimuth_elevation` — the one item A–D didn't close, investigated
+separately (experiments E–I below), and it's a different kind of finding.**
+
+- [x] 🧑🤖 **E. `--disable-fabric-transform-sync`.** Tested twice — once
+  confounded by the write bug below, once clean after fixing it. **Falsified
+  both times**, identical numbers with and without it. Not a Fabric-vs-USD
+  transform-source issue.
+- [x] 🧑🤖 **F. `--respawn-light-for-direction`.** Destroy and recreate the
+  light prim immediately before every rotation write, to test a stale
+  per-light acceleration structure keyed to prim identity. **Falsified**:
+  identical `0.0`/`0.0` result even for a brand-new prim rotated before its
+  first-ever render. Not history- or identity-dependent.
+- [x] 🤖 **G/H. A real, independent bug, found via external research and a
+  missing read-back this knob never had.** `write_light_direction` built the
+  rotation via `Gf.Rotation` → `Decompose(XAxis, YAxis, ZAxis)` → a
+  `TypeRotateXYZ` op; the decomposition's angle order didn't match
+  `TypeRotateXYZ`'s application order. Confirmed by adding the read-back this
+  knob was missing (`read_light_direction`, computing the composed
+  world-space direction): writing `(azimuth=120°, elevation=55°)` read back as
+  roughly `(azimuth≈9°, elevation=55°)` — elevation exact, azimuth scrambled.
+  **Fixed** by switching to a quaternion (`TypeOrient`) op — no axis-order
+  ambiguity by construction. Read-back error dropped from `0.85` to
+  `1.7×10⁻¹⁶` (machine precision). Also fixed at the source: `spike_api.CheckFailed`
+  was discarding every failing check's `facts` (`Report.run()` only attached
+  them on PASS) — this is what made `light.azimuth_elevation`'s actual numbers
+  invisible for most of this investigation; now `CheckFailed` carries its
+  facts through, covered by two new tests in `tests/test_spike_api.py`.
+- [x] 🧑🤖 **I. Re-ran with the fixed write under every config that mattered.**
+  **Fixing the write changed nothing about the render.** With a mathematically
+  exact, large rotation now actually reaching USD, `standard`,
+  `resetPtAccumOnAnimTimeChange`, `minimal`, and Fabric-sync-disabled all still
+  show the two orientations as bitwise-*identical* frames
+  (`states_distinguishable_mad: 0.0`). `light.intensity`/`light.warmth`
+  (scalar attributes, same prim) and `mesh_rotation_control` (a mesh rotation,
+  same configs) all respond correctly throughout. **Seven mechanisms now
+  falsified** — caches, AA jitter, RTPT's own cache namespace, forced
+  accumulation reset, `Minimal` mode, Fabric transform sourcing, and
+  prim-identity/history-dependent caching. The evidence points at something
+  structural: this exact `UsdLux.DistantLight`'s orientation is not consumed
+  by whatever shading path Isaac's PathTracing uses here, independent of any
+  carb setting reachable from outside the renderer.
+- [x] 🤖 **Verdict: blocked, not dropped.** See the "Known limit" section
+  below for why this stays an open, scoped item rather than a closed
+  decision — scene v1 replaces this exact light type, and the failure may be
+  specific to it.
 
 ---
 
@@ -440,6 +459,8 @@ pytest          # tier 0 + mock half green, zero collection errors
 ## Known limit — don't treat the spike verdict as final
 
 Denoiser and accumulation behaviour is **scene-, material- and light-dependent**. The spike uses a shipped Franka + cuboid + default light; scene v1 adds PBR materials, HDRI, area lights, real resolution. The determinism verdict may not transfer and **N almost certainly won't** (it'll be larger). That's why the checks are written as reusable functions and N is recorded as a procedure. Re-gate on scene v1 before generating any dataset — next milestone, but the functions must exist now or it's a rewrite.
+
+- [ ] 🤖 **Specifically: re-test `light.azimuth_elevation` against scene v1's actual light rig before deciding its fate.** Phase 3c's investigation confirmed this latent is blocked on the spike scene's single `DistantLight` — its orientation has no measurable effect on the render under seven different render configurations, with a mathematically verified-exact write (README §7.5). It was **not dropped**: the effect could easily be specific to `UsdLux.DistantLight`'s code path, and scene v1 replaces this light entirely with an HDRI dome plus area lights (§7.4) — a different light type, plausibly a different route from "prim orientation" to "what the renderer shades with." Re-run the identical three-question recipe (`run_knob_check`, already written and reusable, same discipline as the rest of this file) against whatever attribute controls direction on the new rig — an area light's position/orientation, most likely — before including or excluding a direction-like `style` latent for scene v1. Do this before generating any dataset that would depend on the answer either way.
 
 ---
 
