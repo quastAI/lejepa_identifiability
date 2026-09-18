@@ -198,13 +198,17 @@ def build_rig(*, resolution: tuple[int, int] = (128, 128), device: str = "cuda:0
     finger_ids, _ = robot.find_joints(_FINGER_JOINT_NAMES)
 
     # Isaac Lab's standard, stable expansion for env 0 (used throughout the
-    # spikes, e.g. spike_api.py's "{ENV_REGEX_NS}/Robot_" + suffix pattern) --
-    # unverified for this *specific* combination of assets, like everything
-    # else in this module.
+    # spikes, e.g. spike_api.py's "{ENV_REGEX_NS}/Robot_" + suffix pattern).
+    # Built from our own path templates directly, not from `scene["table"].cfg`
+    # -- confirmed on the pod that `scene[...]` indexing returns a bare
+    # `FabricFrameView` (no `.cfg` attribute) for a purely static `AssetBaseCfg`
+    # entry like the table, unlike the `RigidObjectCfg`-backed cube. Using the
+    # templates we already hold avoids depending on that asset-type distinction
+    # at all.
     env0 = "/World/envs/env_0"
     stage = omni.usd.get_context().get_stage()
-    cube_prim = stage.GetPrimAtPath(scene["cube"].cfg.prim_path.replace("{ENV_REGEX_NS}", env0))
-    table_prim = stage.GetPrimAtPath(scene["table"].cfg.prim_path.replace("{ENV_REGEX_NS}", env0))
+    cube_prim = stage.GetPrimAtPath(_CUBE_PATH.replace("{ENV_REGEX_NS}", env0))
+    table_prim = stage.GetPrimAtPath(_TABLE_PATH.replace("{ENV_REGEX_NS}", env0))
     light_prim = stage.GetPrimAtPath(_LIGHT_PATH)
 
     cube_shader = _resolve_bound_shader(cube_prim)
