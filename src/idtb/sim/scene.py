@@ -311,10 +311,9 @@ class IsaacSceneBackend:
         flaky, not deterministic"). Doubles every render's cost; the right
         place to pay it is here, once, rather than in every caller."""
         self._require_bound()
-        self._rig.camera.update(dt=0.0, force_recompute=True)
-        self._rig.sim.render()
-        self._rig.camera.update(dt=0.0, force_recompute=True)
-        self._rig.sim.render()  # discarded settle render (see docstring)
+        for _ in range(5):  # DIAGNOSTIC: was 2 total renders (1 discarded) -- testing 5
+            self._rig.camera.update(dt=0.0, force_recompute=True)
+            self._rig.sim.render()
         self._rig.camera.update(dt=0.0, force_recompute=True)
         rgb = self._rig.camera.data.output["rgb"].clone()
         seg = self._rig.camera.data.output["semantic_segmentation"].clone()
