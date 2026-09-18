@@ -29,7 +29,13 @@ import torch
 
 from idtb.latents import LatentSpec
 from idtb.sim.backend import HandleInfo, UnsupportedRoleError
-from idtb.sim.writer import ROLE_WRITE_PATHS, handle_infos, read_latent_state, write_latent_state
+from idtb.sim.writer import (
+    ROLE_WRITE_PATHS,
+    handle_infos,
+    read_cube_position,
+    read_latent_state,
+    write_latent_state,
+)
 
 Tensor = torch.Tensor
 
@@ -79,7 +85,6 @@ class Rig:
     scene: Any
     camera: Any
     robot: Any
-    cube: Any
     cube_prim: Any
     cube_shader: Any
     table_prim: Any
@@ -88,6 +93,7 @@ class Rig:
     arm_joint_ids: list[int]
     finger_joint_ids: list[int]
     default_cube_edge_m: float
+    default_cube_xy: tuple[float, float]
     ground_z: float
     camera_eye: tuple[float, float, float]
     camera_target: tuple[float, float, float]
@@ -223,7 +229,6 @@ def build_rig(*, resolution: tuple[int, int] = (128, 128), device: str = "cuda:0
         scene=scene,
         camera=scene["camera"],
         robot=robot,
-        cube=scene["cube"],
         cube_prim=cube_prim,
         cube_shader=cube_shader,
         table_prim=table_prim,
@@ -232,6 +237,7 @@ def build_rig(*, resolution: tuple[int, int] = (128, 128), device: str = "cuda:0
         arm_joint_ids=[int(i) for i in arm_ids],
         finger_joint_ids=[int(i) for i in finger_ids],
         default_cube_edge_m=_DEFAULT_CUBE_EDGE_M,
+        default_cube_xy=_CUBE_XY,
         ground_z=0.0,
         camera_eye=_CAMERA_EYE,
         camera_target=_CAMERA_TARGET,
@@ -320,11 +326,19 @@ class IsaacSceneBackend:
         cube and the last robot body (the end-effector, by articulation
         order) against the cube's own half-edge, the same order-of-magnitude
         approximation `read_cube_bbox_extent` already uses elsewhere.
+
+        Cube position comes from `read_cube_position()` (USD, not the
+        tensor-API root-pose buffer) -- `write_latent_state()` no longer
+        writes the cube's pose through the tensor API at all (see its
+        docstring), so `cube.data.root_pos_w` would be permanently stale.
         """
         if not hasattr(self, "_last_seg"):
             raise RuntimeError("diagnostics() before any render()")
         visible = float((self._last_seg > 0).any().item())
-        cube_pos = self._rig.cube.data.root_pos_w[0]
+        cube_x, cube_y = read_cube_position(self._rig)
+        cube_z = self._rig.ground_z + 0.5 * self._rig.default_cube_edge_m
+        origin = self._rig.scene.env_origins[0]
+        cube_pos = torch.tensor([cube_x, cube_y, cube_z], device=origin.device) + origin
         ee_pos = self._rig.robot.data.body_pos_w[0, -1]
         distance = float(torch.linalg.norm(cube_pos - ee_pos).item())
         collided = distance < 0.5 * self._rig.default_cube_edge_m

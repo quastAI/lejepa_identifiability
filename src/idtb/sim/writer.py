@@ -95,23 +95,33 @@ def write_latent_state(rig: Rig, spec: LatentSpec, phi: Tensor) -> None:
     batched equivalent.
 
     Confirmed on the pod (and matching isaac-sim/IsaacLab#6394): a plain
-    `sim.forward()` is not enough to make a joint/root-state write show up
-    in a render -- Fabric-mirrored transforms only get republished by
-    PhysX's own `simulate()`/`fetch_results()` cycle, which only
-    `sim.step()` calls. README §5.5's original "no physics stepping"
-    policy assumed `forward()` was sufficient; it wasn't. A real
-    `sim.step(render=False)` is currently the *only* public path that
-    republishes a tensor-API write to the renderer (IsaacLab#7138, which
-    would add a lighter zero-dynamics alternative, is open/unmerged). We
-    also set the joint position *target*, not just the state, so the PD
-    controller has zero error at the moment of that step and doesn't drift
-    the write during it -- confirmed by measurement, zero drift observed.
+    `sim.forward()` is not enough to make a joint write show up in a render
+    -- Fabric-mirrored transforms only get republished by PhysX's own
+    `simulate()`/`fetch_results()` cycle, which only `sim.step()` calls.
+    README §5.5's original "no physics stepping" policy assumed
+    `forward()` was sufficient; it wasn't. A real `sim.step(render=False)`
+    is currently the *only* public path that republishes a tensor-API
+    write to the renderer (IsaacLab#7138, which would add a lighter
+    zero-dynamics alternative, is open/unmerged). We also set the joint
+    position *target*, not just the state, so the PD controller has zero
+    error at the moment of that step and doesn't drift the write during it
+    -- confirmed by measurement, zero drift observed.
+
+    `cube.x`/`cube.y` go through a translate xform op instead, exactly
+    like `cube.size`'s scale op -- also confirmed on the pod: *any*
+    tensor-API root-pose write on the cube permanently kills that same
+    process's ability to render later `cube.hue`/`cube.size` attribute
+    edits, regardless of write order relative to `sim.step()`. No official
+    example combines a kinematic pose write with a live material edit in
+    one loop (the tutorials only ever set materials once, before
+    `sim.reset()`); a pure-USD position write sidesteps the interaction
+    entirely rather than working around it.
     """
     if phi.shape[0] != 1:
         raise ValueError(f"write_latent_state supports B=1 only, got shape {tuple(phi.shape)}")
 
     joint_pos = rig.robot.data.default_joint_pos.clone()
-    root = rig.cube.data.default_root_state.clone()
+    cube_x, cube_y = rig.default_cube_xy
 
     for i, handle in enumerate(spec.handles):
         role = handle.role
@@ -122,9 +132,9 @@ def write_latent_state(rig: Rig, spec: LatentSpec, phi: Tensor) -> None:
             for joint_id in rig.finger_joint_ids:
                 joint_pos[:, joint_id] = value
         elif role == "cube.x":
-            root[:, 0] = value
+            cube_x = value
         elif role == "cube.y":
-            root[:, 1] = value
+            cube_y = value
         elif role == "cube.size":
             _write_cube_scale(rig, value)
         elif role == "cube.hue":
@@ -143,20 +153,16 @@ def write_latent_state(rig: Rig, spec: LatentSpec, phi: Tensor) -> None:
             raise AssertionError(f"unhandled role {role!r} -- bind() should have refused it")
 
     edge_m = resolve_cube_edge_m(spec, phi, default_edge_m=rig.default_cube_edge_m)
-    root[:, 2] = rig.ground_z + 0.5 * edge_m
-    root[:, 0:3] += rig.scene.env_origins
-    root[:, 7:] = 0.0  # linear + angular velocity (README §4.4)
+    _write_cube_position(rig, cube_x, cube_y, edge_m)
 
     rig.robot.set_joint_position_target(joint_pos)
     rig.robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos))
-    rig.cube.write_root_pose_to_sim(root[:, :7])
-    rig.cube.write_root_velocity_to_sim(torch.zeros_like(root[:, 7:]))
 
     dx, dy = split_camera_jitter(spec, phi)
     _aim_camera(rig, jitter_xy=(dx, dy))
 
     rig.scene.write_data_to_sim()
-    rig.sim.step(render=False)  # republishes the write to Fabric (see docstring)
+    rig.sim.step(render=False)  # republishes the arm's write to Fabric (see docstring)
 
 
 def read_latent_state(rig: Rig, spec: LatentSpec) -> Tensor:
@@ -164,7 +170,7 @@ def read_latent_state(rig: Rig, spec: LatentSpec) -> Tensor:
     back through whichever path wrote it."""
     values = torch.empty(1, spec.n, dtype=torch.float32)
     joint_pos = rig.robot.data.joint_pos
-    cube_pos = rig.cube.data.root_pos_w - rig.scene.env_origins
+    cube_x, cube_y = read_cube_position(rig)
 
     for i, handle in enumerate(spec.handles):
         role = handle.role
@@ -173,9 +179,9 @@ def read_latent_state(rig: Rig, spec: LatentSpec) -> Tensor:
         elif role == "gripper.aperture":
             values[0, i] = joint_pos[0, rig.finger_joint_ids[0]]
         elif role == "cube.x":
-            values[0, i] = cube_pos[0, 0]
+            values[0, i] = cube_x
         elif role == "cube.y":
-            values[0, i] = cube_pos[0, 1]
+            values[0, i] = cube_y
         elif role == "cube.size":
             values[0, i] = _read_cube_edge(rig)
         elif role == "cube.hue":
@@ -195,6 +201,33 @@ def read_latent_state(rig: Rig, spec: LatentSpec) -> Tensor:
         else:
             raise AssertionError(f"unhandled role {role!r} -- bind() should have refused it")
     return values
+
+
+def _write_cube_position(rig: Rig, x: float, y: float, edge_m: float) -> None:
+    """`cube.x`/`cube.y` via a translate xform op (see `write_latent_state`'s
+    docstring for why this isn't a `write_root_pose_to_sim` call) -- z comes
+    along for free from the resting-height rule (README §4.4), local frame
+    (no `env_origins` offset), matching how `read_cube_position` reads it
+    back."""
+    from pxr import Gf, UsdGeom
+
+    z = rig.ground_z + 0.5 * edge_m
+    op = _find_or_add_xform_op(rig.cube_prim, UsdGeom.XformOp.TypeTranslate)
+    op.Set(Gf.Vec3d(x, y, z))
+
+
+def read_cube_position(rig: Rig) -> tuple[float, float]:
+    """`(x, y)`, local frame -- the counterpart to `_write_cube_position`,
+    also used by `IsaacSceneBackend.diagnostics()`'s collision proxy since
+    the cube's root-pose tensor buffer is never written any more."""
+    from pxr import UsdGeom
+
+    xformable = UsdGeom.Xformable(rig.cube_prim)
+    for op in xformable.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            value = op.Get()
+            return float(value[0]), float(value[1])
+    return rig.default_cube_xy
 
 
 def _write_cube_scale(rig: Rig, edge_m: float) -> None:
@@ -285,13 +318,26 @@ def _aim_camera(rig: Rig, *, jitter_xy: tuple[float, float]) -> None:
 def _find_or_add_xform_op(prim: Any, op_type: Any) -> Any:
     """Find an existing xform op of `op_type` on `prim`, or add one --
     `UsdGeom.XformCommonAPI` fails silently on a pattern it doesn't expect
-    (README §7.5's `cube.size` finding)."""
+    (README §7.5's `cube.size` finding). Keeps a fixed [translate, scale]
+    order regardless of which role happens to be written first this
+    session, so translate is always the outermost op (applied after
+    scale) -- scaling around the cube's own origin, then moving it, not
+    the other way round."""
     from pxr import UsdGeom
 
     xformable = UsdGeom.Xformable(prim)
     for op in xformable.GetOrderedXformOps():
         if op.GetOpType() == op_type:
             return op
-    if op_type == UsdGeom.XformOp.TypeScale:
-        return xformable.AddScaleOp()
-    raise ValueError(f"no add-op helper wired up for {op_type!r}")
+    if op_type == UsdGeom.XformOp.TypeTranslate:
+        new_op = xformable.AddTranslateOp()
+    elif op_type == UsdGeom.XformOp.TypeScale:
+        new_op = xformable.AddScaleOp()
+    else:
+        raise ValueError(f"no add-op helper wired up for {op_type!r}")
+    ordered = sorted(
+        xformable.GetOrderedXformOps(),
+        key=lambda op: 0 if op.GetOpType() == UsdGeom.XformOp.TypeTranslate else 1,
+    )
+    xformable.SetXformOpOrder(ordered)
+    return new_op
