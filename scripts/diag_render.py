@@ -57,7 +57,8 @@ for name, z in cases.items():
     phi = spec.squash(z)
     backend.write_state(phi)
     reads[name] = backend.read_state()
-    frames[name] = backend.render(0)["cam0"]["rgb"].clone()
+    backend.render(0)  # discarded settle render (spike_api.py's "warm-up, discarded")
+    frames[name] = backend.render(1)["cam0"]["rgb"].clone()
     print(f"READ_{name}", reads[name], flush=True)
 
 base_frame = frames["base"].float()
