@@ -202,6 +202,7 @@ Deliberately small. This is the complete list; anything outside it is out of sco
 **Boot** — `src/idtb/sim/app.py`, the only module permitted to do this
 - `isaaclab.app.AppLauncher`, `AppLauncher.add_app_launcher_args(parser)`, `app_launcher.app`, `simulation_app.close()`
 - Flags: `headless=True`, `enable_cameras=True` (required for sensor rendering in standalone scripts), `renderer=…`
+- ⚠ **`AppLauncher`/`SimulationApp` reads `sys.argv` directly, independent of the `args` object passed to its constructor.** Confirmed on the pod (docs/PLAN.md Phase 4): booting from inside a `pytest` process leaves `sys.argv` full of pytest's own flags, which Kit's native CLI parser cannot parse — and it fails by **segfaulting the whole process**, not raising a catchable exception (`[Error] [omni.kit.app.plugin] Ill formed parameter: -m` in the native traceback right before the crash). Every script-style entry point here was unaffected only because its own argv already happened to be Kit-parseable. `idtb.sim.app.launch()` scrubs `sys.argv` to just the program name for the duration of the boot call as the fix.
 
 **Simulation context**
 - `isaaclab.sim.SimulationCfg`, `RenderCfg`, `SimulationContext`

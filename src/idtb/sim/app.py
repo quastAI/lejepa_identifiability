@@ -7,6 +7,7 @@ process-global and one-shot: never call :func:`launch` a second time.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 
@@ -22,9 +23,24 @@ def launch(args: Any) -> Any:
     (README §4.4); set here via `setattr` if the caller's parser exposed the
     flag but left it at its default, so a caller does not have to remember
     this every time.
+
+    **Confirmed on the pod:** `AppLauncher`/`SimulationApp` hands Kit's own
+    native CLI parser `sys.argv` directly, independent of `args` -- every
+    prior Isaac-facing script here ran as `isaaclab.sh -p script.py [flags
+    Kit already understands]`, so this never surfaced before. Booting from
+    inside a `pytest` process leaves `sys.argv` full of pytest's own flags
+    (e.g. `-m isaac`), which Kit's parser cannot parse and which crashed the
+    whole process with a segfault rather than a catchable exception. `argv`
+    is scrubbed to just the program name for the duration of the boot call,
+    since Kit never needs more than that once `args` has already been built.
     """
     from isaaclab.app import AppLauncher
 
     if hasattr(args, "enable_cameras"):
         args.enable_cameras = True
-    return AppLauncher(args).app
+    saved_argv = sys.argv
+    sys.argv = saved_argv[:1]
+    try:
+        return AppLauncher(args).app
+    finally:
+        sys.argv = saved_argv
