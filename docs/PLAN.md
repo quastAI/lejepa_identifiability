@@ -266,6 +266,101 @@ that **Spikes 1–4 verified nothing about** (**Phase 3b**, one pod session).
 
 ---
 
+## Phase 3c — Spike 5 diagnosis, round 2 (external research lead, untested)
+
+> `docs/research_task_full_style_determinism.md` was sent out as a research
+> question after the four falsified fixes above; `docs/answer.md` is the reply.
+> **This is a set of new hypotheses and a specific experiment order, not a
+> fix** — nothing below has been run. Per the no-premature-pins rule, none of
+> these carb keys go into `standard` or into code until a pod run confirms
+> them; they're a checklist, not a decision.
+
+**What's actually new versus the four already-falsified attempts** (render
+depth 1→8, discard-first warm-up, preset-once-vs-per-check, wider light
+angular size): those varied *when*/*how often* the same four carb keys were
+applied. Nothing before touched the path tracer's **caches** or its **AA
+jitter**, and nothing checked whether the four carb keys are even the
+attribute the camera's RenderProduct reads. Two of the falsified results turn
+out to *corroborate* the new leading theory rather than sit unexplained:
+- the warm-up-render regression of `cube.size` (`0.0` → `~1.87`) is exactly
+  what a cross-frame-cache theory predicts (a warm-up hands the cube a warm
+  cache too), where a "needs more convergence" theory predicted the opposite.
+- the widened-light-angle result, which moved 3 of 5 knobs but left
+  `light.azimuth_elevation` and `cam.jitter` bit-for-bit unchanged, is
+  consistent with a cache/change-detection mechanism that isn't uniformly
+  triggered by shadow softness.
+
+**One flagged concern that does *not* apply to us:** the reply worries that
+`cube.size`'s clean `0.0` could be a Fabric-override no-op (the kinematic
+cube's transform might be written to Fabric while the USD scale op is
+ignored). It couldn't see our code. But `run_knob_check`
+(`spikes/spike_dynamic_attrs.py:675`) already runs `sensitivity_report` on
+every knob, `cube.size` included, and gates the check on `all_responsive`
+*before* the determinism check even runs — Spike 5's own three-question
+ordering (§7.5, "sensitivity ranks above determinism") was designed for
+precisely this failure mode. `cube.size` could not have reported "confirmed
+good" if it were a no-op. Worth re-confirming the actual mad number on the
+next run since it was never written down, but there's no reason to doubt the
+clean verdict.
+
+**Next pod session — run in this order** (each falsifies a specific claim
+before spending time on the next):
+
+- [ ] 🧑🤖 **A. Audit what's actually configured (~10 min).** Dump every
+  `omni:rtx:*` attribute on the camera's RenderProduct prim; compare against
+  the four carb keys `standard` sets. Isaac Sim 6.x's per-product render
+  settings (`omni:rtx:rendermode`, `omni:rtx:pt:samplesPerPixel`, etc.) are a
+  separate mechanism from the global/deprecated carb keys, and reading a carb
+  key back only proves carb stored it — not that the RenderProduct used it.
+  **Falsifies:** "the `standard` preset is actually live on this render path."
+  If it isn't, everything measured under §7.5 needs re-interpreting, not just
+  patching.
+- [ ] 🧑🤖 **B. Disable every path-tracer cache and stochastic filter, re-run
+  the five blocked knobs.** New settings, none tried before:
+  `/rtx/pathtracing/cached/enabled=False`,
+  `/rtx/pathtracing/lightcache/cached/enabled=False`,
+  `/rtx/pathtracing/adaptiveSampling/enabled=False`,
+  `/rtx/pathtracing/fireflyFilter/enabled=False`,
+  `/rtx/pathtracing/aa/op=0`, `/rtx/pathtracing/aa/filterRadius=0.0` — via the
+  per-product attributes instead of carb if A shows carb isn't authoritative.
+  (`antialiasing_mode="Off"` in `RenderCfg` is an Isaac Lab **Real-Time**-mode
+  call and very likely does nothing under `PathTracing`, where AA is the
+  `/rtx/pathtracing/aa/*` jittered pixel filter — sub-pixel jitter may have
+  been on the whole time.) **Prediction:** the five nonzero `back_to_back_mad`
+  values drop to `0.0` or by an order of magnitude. If none move at all, the
+  cache/AA-jitter theory is dead and C/D are next.
+- [ ] 🧑🤖 **C. Force cold accumulation, matching our exact capture pattern.**
+  Set `/rtx/resetPtAccumOnAnimTimeChange=True`; call
+  `RenderContext.reset_transform_cadence()` (or
+  `reset_scene_state_cadence()`) before each capture; try
+  `omni.kit.app.get_app().update()` in place of `sim.render()`. This is the
+  **version-matched lead**: IsaacLab#6609, reported against our exact
+  Isaac Lab build, is that `RenderContext` publishes renderer scene state at
+  most once per physics-step count, and a caller that calls `forward()`
+  without advancing that count — which is precisely §5.5's zero-`sim.step()`
+  capture loop — can skip publication entirely.
+- [ ] 🧑🤖 **D. Escape hatch: Minimal render mode.** If B and C both fail to
+  move the numbers, re-run the full Spike 5 table under Isaac's `Minimal`
+  render mode (hard shadows, first distant light only, no Monte Carlo state,
+  no caches, no accumulation) instead of `PathTracing`. Loses little for a
+  128×128 cube-on-plane scene; the material/light/camera knobs still change
+  the image. This changes `standard` itself, so it needs its own §7.1 gate
+  re-run against `base`, not just the five blocked knobs.
+- [ ] 🤖 **If none of A–D land bitwise-clean:** record a fallback acceptance
+  criterion instead of giving up the render path — render each state twice in
+  shuffled order and test whether a linear probe on `b1 − b2` predicts the
+  varied factor above chance. This is weaker than bitwise equality but matches
+  what §7.1 actually needs (no *information* about the latent in the
+  residual, not literal bit-identity). Record as a Decision Register candidate
+  in README §3.1, not an adopted change — a real decision needs the pod data
+  from A–D first.
+- [ ] 🤖 **README checkpoint 4** — whichever of A–D resolves it (or the
+  fallback criterion, if adopted) gets written into §7.3's `standard` preset,
+  §7.5's verdict, and §11's risk row. If A–D all fail, §7.5 records that too,
+  with the fallback criterion as the new plan of record for `full`/`style`.
+
+---
+
 ## Phase 4 — Build against verified reality
 
 > **Scope note on "verified": Spike 1/2 only cover physics-state writes** (joint angles, rigid-body pose) — README §5.2's `base` group. Every `full` and `style` latent (cube size and colour; lighting, per-sample camera jitter, exposure, materials) uses a write path that hasn't been touched. **Phase 3b is the gate**: don't wire any of those into `SceneBackend`/`generate.py` as a first-class latent before that spike has a verdict. The `base`-only pipeline does not wait on it.
