@@ -145,6 +145,7 @@ def write_latent_state(rig: Rig, spec: LatentSpec, phi: Tensor) -> None:
     rig.sim.forward()  # flush USD/Fabric, no time advance (README §4.5) --
     # the renderer reads transforms from Fabric; without this the rendered
     # image never picks up the write even though `.data.*` read-back does.
+    _advance_anim_time_epsilon()
 
 
 def read_latent_state(rig: Rig, spec: LatentSpec) -> Tensor:
@@ -255,6 +256,19 @@ def _read_light_warmth(light_prim: Any) -> float:
     from pxr import UsdLux
 
     return float(UsdLux.LightAPI(light_prim).GetColorTemperatureAttr().Get())
+
+
+def _advance_anim_time_epsilon() -> None:
+    """Force the `standard` preset's `resetPtAccumOnAnimTimeChange` (README
+    §7.3) to fire without stepping physics -- joint/root-state writes land
+    straight in PhysX/Fabric buffers with no USD change notice, unlike an
+    attribute `Set()` call, so nothing else tells the path tracer the scene
+    changed. Bumping the timeline's current time is the one anim-time
+    trigger that doesn't require `sim.step()` (README §5.5)."""
+    import omni.timeline
+
+    timeline = omni.timeline.get_timeline_interface()
+    timeline.set_current_time(timeline.get_current_time() + 1e-6)
 
 
 def _aim_camera(rig: Rig, *, jitter_xy: tuple[float, float]) -> None:
