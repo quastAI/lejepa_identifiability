@@ -53,6 +53,8 @@ cube_z[0, 5:7] = 1.0
 hue_z = base_z.clone()
 hue_z[0, 7] = 1.0
 
+from idtb.sim.writer import _write_hue  # noqa: E402
+
 cases = {"base": base_z, "arm_only": arm_z, "cube_only": cube_z, "hue_only": hue_z}
 frames = {}
 for name, z in cases.items():
@@ -60,12 +62,16 @@ for name, z in cases.items():
     backend.write_state(phi)
     before = backend.read_state()
     backend._rig.sim.step(render=False)
+    # Re-apply the attribute write AFTER the step: testing whether step()
+    # force-syncs Fabric with a stale (scene-build-time) mirrored copy of
+    # the material, shadowing a USD Set() that happened before the step.
+    hue_value = float(phi[0, spec.index("cube.hue")].item())
+    _write_hue(backend._rig.cube_shader, hue_value)
     after = backend.read_state()
     drift = (after - before).abs().max().item()
     print(f"DRIFT_{name}", drift, flush=True)
     print(f"READ_{name}_after_step", after, flush=True)
-    for _ in range(7):  # extra discarded settle renders (material recompile?)
-        backend.render(0)
+    backend.render(0)  # discarded settle render
     frames[name] = backend.render(1)["cam0"]["rgb"].clone()
 
 base_frame = frames["base"].float()
