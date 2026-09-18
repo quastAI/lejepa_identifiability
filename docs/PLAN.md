@@ -303,49 +303,85 @@ good" if it were a no-op. Worth re-confirming the actual mad number on the
 next run since it was never written down, but there's no reason to doubt the
 clean verdict.
 
-**Next pod session — run in this order** (each falsifies a specific claim
-before spending time on the next):
+- [x] 🤖 **Write the code for experiments A–D.** All four levers landed in
+  `spikes/spike_dynamic_attrs.py`, opt-in and independently togglable so an
+  unflagged run reproduces exactly the Round-1 configuration behind README
+  §7.5's verdict — nothing has been run on the pod yet. While tracking down
+  the real carb key names (not guessing — same discipline as the rest of this
+  file), reading Isaac Lab's own source turned up something docs/answer.md
+  couldn't have known: **Isaac Lab ships its own built-in "deterministic
+  rendering" recipe**,
+  `isaaclab_physx.renderers.isaac_rtx_renderer_utils.apply_isaac_rtx_determinism_settings()`
+  — `RealTimePathTracing` with its own `/rtx/rtpt/cached/enabled` and
+  `/rtx/rtpt/lightcache/cached/enabled` disabled. That's a *different*
+  render mode and a *different* cache namespace than our `standard`
+  (`PathTracing` + `/rtx/pathtracing/*`), and a combination Spike 1 never
+  measured (it only tried as-booted `RealTimePathTracing` with caches on,
+  which failed). Folded in as `--extra-preset realtime_rtpt_caches_off`,
+  alongside experiment D's `minimal`. Tests: `tests/test_spike_dynamic_attrs.py`
+  covers the new pure pieces (`dump_render_product_rtx_attributes`, the
+  `EXTRA_PRESETS` registry, `resolve_cadence_reset`'s fallback chain) with a
+  fake USD prim / render context — 118/118 tests and `ruff check` green
+  locally.
 
-- [ ] 🧑🤖 **A. Audit what's actually configured (~10 min).** Dump every
-  `omni:rtx:*` attribute on the camera's RenderProduct prim; compare against
-  the four carb keys `standard` sets. Isaac Sim 6.x's per-product render
-  settings (`omni:rtx:rendermode`, `omni:rtx:pt:samplesPerPixel`, etc.) are a
-  separate mechanism from the global/deprecated carb keys, and reading a carb
-  key back only proves carb stored it — not that the RenderProduct used it.
-  **Falsifies:** "the `standard` preset is actually live on this render path."
-  If it isn't, everything measured under §7.5 needs re-interpreting, not just
-  patching.
-- [ ] 🧑🤖 **B. Disable every path-tracer cache and stochastic filter, re-run
-  the five blocked knobs.** New settings, none tried before:
-  `/rtx/pathtracing/cached/enabled=False`,
+**Next pod session — run in this order** (each falsifies a specific claim
+before spending time on the next; unless noted, run
+`spikes/spike_dynamic_attrs.py` with the given flags added to the existing
+Round-1 invocation):
+
+- [ ] 🧑🤖 **A. Audit what's actually configured (~10 min, always on).**
+  `render_product_attribute_audit` runs on every invocation now, no flag
+  needed — it dumps every `omni:rtx:*` attribute on the camera's RenderProduct
+  prim and reports it next to the carb keys `standard` sets. Isaac Sim 6.x's
+  per-product render settings (`omni:rtx:rendermode`,
+  `omni:rtx:pt:samplesPerPixel`, etc.) are a separate mechanism from the
+  global/deprecated carb keys, and reading a carb key back only proves carb
+  stored it — not that the RenderProduct used it. **Falsifies:** "the
+  `standard` preset is actually live on this render path." If it isn't,
+  everything measured under §7.5 needs re-interpreting, not just patching.
+- [ ] 🧑🤖 **B. `--extra-preset caches_and_aa_off`.** Disables every
+  path-tracer cache and stochastic filter under our existing `PathTracing`
+  mode — none tried before: `/rtx/pathtracing/cached/enabled=False`,
   `/rtx/pathtracing/lightcache/cached/enabled=False`,
   `/rtx/pathtracing/adaptiveSampling/enabled=False`,
   `/rtx/pathtracing/fireflyFilter/enabled=False`,
-  `/rtx/pathtracing/aa/op=0`, `/rtx/pathtracing/aa/filterRadius=0.0` — via the
-  per-product attributes instead of carb if A shows carb isn't authoritative.
-  (`antialiasing_mode="Off"` in `RenderCfg` is an Isaac Lab **Real-Time**-mode
-  call and very likely does nothing under `PathTracing`, where AA is the
-  `/rtx/pathtracing/aa/*` jittered pixel filter — sub-pixel jitter may have
-  been on the whole time.) **Prediction:** the five nonzero `back_to_back_mad`
-  values drop to `0.0` or by an order of magnitude. If none move at all, the
-  cache/AA-jitter theory is dead and C/D are next.
-- [ ] 🧑🤖 **C. Force cold accumulation, matching our exact capture pattern.**
-  Set `/rtx/resetPtAccumOnAnimTimeChange=True`; call
-  `RenderContext.reset_transform_cadence()` (or
-  `reset_scene_state_cadence()`) before each capture; try
-  `omni.kit.app.get_app().update()` in place of `sim.render()`. This is the
-  **version-matched lead**: IsaacLab#6609, reported against our exact
-  Isaac Lab build, is that `RenderContext` publishes renderer scene state at
-  most once per physics-step count, and a caller that calls `forward()`
-  without advancing that count — which is precisely §5.5's zero-`sim.step()`
-  capture loop — can skip publication entirely.
-- [ ] 🧑🤖 **D. Escape hatch: Minimal render mode.** If B and C both fail to
-  move the numbers, re-run the full Spike 5 table under Isaac's `Minimal`
-  render mode (hard shadows, first distant light only, no Monte Carlo state,
-  no caches, no accumulation) instead of `PathTracing`. Loses little for a
+  `/rtx/pathtracing/aa/op=0`, `/rtx/pathtracing/aa/filterRadius=0.0`. Real
+  keys, confirmed by reading OmniGibson's
+  `renderer_settings/path_tracing_settings.py` (which enumerates Isaac Sim's
+  actual PathTracing settings), not guessed — `adaptiveSampling/enabled` is
+  the one key that source doesn't corroborate, and `apply_carb_settings`'s
+  `accepted` read-back flag is what tells it apart from the rest. Also
+  confirmed independently: `RenderCfg(antialiasing_mode="Off")` calls
+  `rep.settings.set_render_rtx_realtime(...)`
+  (`isaac_rtx_renderer_utils._apply_isaac_rtx_global_settings`) — a
+  **Real-Time**-mode call that does nothing under our `PathTracing` mode,
+  where AA is the separate `/rtx/pathtracing/aa/*` jittered pixel filter.
+  Sub-pixel jitter may have been on this whole time. **Prediction:** the five
+  nonzero `back_to_back_mad` values drop to `0.0` or by an order of magnitude.
+  If none move at all, the cache/AA-jitter theory is dead and C/D are next.
+- [ ] 🧑🤖 **C. Three independent levers, tried alone before combined:**
+  `--reset-pt-accum-on-time-change`, `--reset-cadence-per-capture`, and
+  `--capture-via app_update`. The middle one is the **version-matched lead**:
+  [IsaacLab#6609](https://github.com/isaac-sim/IsaacLab/issues/6609), filed
+  against our exact `beta2.patch1` release, is that `RenderContext` publishes
+  renderer scene state at most once per physics-step count, and a caller that
+  calls `forward()` without advancing that count — precisely §5.5's
+  zero-`sim.step()` capture loop — can skip publication entirely. Its own
+  fix, confirmed from the issue text: `render_context.reset_transform_cadence()`
+  is public on our exact release; `reset_scene_state_cadence()` may not be yet.
+  `resolve_cadence_reset()` tries both and records which one (if either)
+  answered.
+- [ ] 🧑🤖 **D. Two escape-hatch presets if B and C both fail to move the
+  numbers:** `--extra-preset realtime_rtpt_caches_off` (Isaac Lab's own
+  built-in recipe, above — a real, shipped alternative, not our guess) and
+  `--extra-preset minimal` (Isaac's `Minimal` render mode: hard shadows, first
+  distant light only, no Monte Carlo state, no caches, no accumulation; the
+  exact string and per-product attribute name (`omni:rtx:rendermode` /
+  `"Minimal"`) confirmed from `isaaclab_physx.renderers.isaac_rtx_renderer`,
+  applied here as a global carb write for a first cut). Loses little for a
   128×128 cube-on-plane scene; the material/light/camera knobs still change
-  the image. This changes `standard` itself, so it needs its own §7.1 gate
-  re-run against `base`, not just the five blocked knobs.
+  the image. Either changes `standard` itself, so whichever works needs its
+  own §7.1 gate re-run against `base`, not just the five blocked knobs.
 - [ ] 🤖 **If none of A–D land bitwise-clean:** record a fallback acceptance
   criterion instead of giving up the render path — render each state twice in
   shuffled order and test whether a linear probe on `b1 − b2` predicts the

@@ -828,28 +828,46 @@ with them now would inject exactly the confound the determinism gate exists to
 catch. This blocks the `full`/`style` extension (§11 Risk Register) until the
 cause is found or a different render configuration is verified clean.
 
-**Round 2, not yet run — a new, more specific lead.** `docs/answer.md`
-(external research reply to `docs/research_task_full_style_determinism.md`)
-proposes that the residual is the path tracer's **cross-frame caches and AA
-jitter**, not sample count — `/rtx/pathtracing/cached/enabled`,
-`/rtx/pathtracing/lightcache/cached/enabled`, and adaptive sampling all
-default *on* and were never touched by the four fixes above, and
-`RenderCfg(antialiasing_mode="Off")` is an Isaac Lab **Real-Time**-mode call
-that likely does nothing under `PathTracing`, where AA is a separate jittered
-pixel filter. Two of the already-falsified results are consistent with this
+**Round 2, code written, not yet run on the pod — a new, more specific lead.**
+`docs/answer.md` (external research reply to
+`docs/research_task_full_style_determinism.md`) proposes that the residual is
+the path tracer's **cross-frame caches and AA jitter**, not sample count —
+`/rtx/pathtracing/cached/enabled`, `/rtx/pathtracing/lightcache/cached/enabled`,
+and adaptive sampling all default *on* and were never touched by the four
+fixes above, and `RenderCfg(antialiasing_mode="Off")` is an Isaac Lab
+**Real-Time**-mode call that does nothing under `PathTracing`, where AA is a
+separate jittered pixel filter — confirmed by reading Isaac Lab's own source
+(`isaac_rtx_renderer_utils._apply_isaac_rtx_global_settings`), not just
+inferred. Two of the already-falsified results are consistent with this
 theory rather than unexplained by it (docs/PLAN.md Phase 3c has the detail).
 It also names a version-matched candidate root cause,
-[IsaacLab#6609](https://github.com/isaac-sim/IsaacLab/issues/6609): renderer
-scene-state publishes at most once per physics-step count, and our capture
-loop calls `sim.forward()` with **zero** `sim.step()` calls by design (§5.5) —
-exactly the regime that issue reports as able to skip publication. **This is a
-genuinely new, untested set of experiments** (docs/PLAN.md Phase 3c, ordered
-A–D), not a rerun of the four falsified ones — it does not make the spike
-green by itself; it gives a specific next pod session a real chance to. One
-concern the reply raised (that `cube.size`'s clean result could be a
-Fabric-override no-op) does not apply here: `run_knob_check` already gates
-every knob, `cube.size` included, on `sensitivity_report` before the
-determinism check runs, so a no-op could not have reported clean.
+[IsaacLab#6609](https://github.com/isaac-sim/IsaacLab/issues/6609), filed
+against our exact `beta2.patch1` release: renderer scene-state publishes at
+most once per physics-step count, and our capture loop calls `sim.forward()`
+with **zero** `sim.step()` calls by design (§5.5) — exactly the regime that
+issue reports as able to skip publication; its fix,
+`render_context.reset_transform_cadence()`, is confirmed public on our exact
+release from the issue text itself.
+
+Writing the code to test this turned up a second, independent lead docs/answer.md
+had no way to see: **Isaac Lab ships its own built-in "deterministic
+rendering" recipe**, `isaac_rtx_renderer_utils.apply_isaac_rtx_determinism_settings()`
+— `RealTimePathTracing` with a *different* cache namespace
+(`/rtx/rtpt/cached/enabled`, `/rtx/rtpt/lightcache/cached/enabled`) disabled.
+Spike 1 measured as-booted `RealTimePathTracing` non-deterministic, but never
+with these two caches off — a real, shipped, untested combination, not a
+guess.
+
+All four experiments (`spikes/spike_dynamic_attrs.py`'s `--extra-preset`,
+`--reset-pt-accum-on-time-change`, `--reset-cadence-per-capture`,
+`--capture-via` flags, plus an always-on RenderProduct-attribute audit) are
+now implemented and unit-tested (118/118 pure-layer tests green locally,
+docs/PLAN.md Phase 3c) — **this does not make the spike green by itself; it
+gives a specific next pod session a real chance to.** One concern the reply
+raised (that `cube.size`'s clean result could be a Fabric-override no-op)
+does not apply here: `run_knob_check` already gates every knob, `cube.size`
+included, on `sensitivity_report` before the determinism check runs, so a
+no-op could not have reported clean.
 
 Motion blur is a **separate, expected, understood FAIL**: blur implies motion
 over time and this pipeline has none by design (§5.5) — a completed check, same
@@ -1136,7 +1154,7 @@ Mechanics:
 | Occlusion makes g non-injective; results look like encoder failure | High | Multi-view cameras, high oblique placement, per-sample visibility logging, injectivity proxy check. |
 | Cube rotational symmetry hides a latent dimension | High | Omit yaw from `base`; switch to a visually asymmetric object before introducing orientation latents (§5.2.1). |
 | A `style` knob is silently disconnected, so invariance is measured for free | High | **New with the group design.** A write that lands but changes no pixels is indistinguishable from a perfectly invariant encoder in every downstream metric. Mitigated by §7.5's per-knob sensitivity check, ranked above determinism, and by §10.1's style-sensitivity gate running on generated data, not only in the spike. |
-| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | Critical | **Confirmed, not just anticipated.** Spike 5 (§7.5) measured `cube.hue`/`light.*`/`cam.jitter`/`exposure` failing §7.1's bitwise gate at a small (~1.7–2.6/255), fully reproducible magnitude; `cube.size` alone is clean. Four targeted fixes (render depth, warm-up render, preset-application frequency, light angular size) were each tried and falsified. **A new, more specific lead is queued but not yet run** (§7.5 "Round 2", docs/PLAN.md Phase 3c): path-tracer caches + AA jitter never disabled, plus a version-matched IsaacLab#6609 match to our zero-`sim.step()` capture loop. Blocks `full` beyond `cube.size` and all of `style` until one of those experiments lands clean, or the fallback linear-probe criterion (Phase 3c) is adopted instead — does not block the `base`-only pipeline. |
+| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | Critical | **Confirmed, not just anticipated.** Spike 5 (§7.5) measured `cube.hue`/`light.*`/`cam.jitter`/`exposure` failing §7.1's bitwise gate at a small (~1.7–2.6/255), fully reproducible magnitude; `cube.size` alone is clean. Four targeted fixes (render depth, warm-up render, preset-application frequency, light angular size) were each tried and falsified. **A new, more specific lead has code written but no pod run yet** (§7.5 "Round 2", docs/PLAN.md Phase 3c): path-tracer caches + AA jitter never disabled, a version-matched IsaacLab#6609 match to our zero-`sim.step()` capture loop, and Isaac Lab's own built-in `RealTimePathTracing`+RTPT-caches-off recipe. Blocks `full` beyond `cube.size` and all of `style` until one of those experiments lands clean, or the fallback linear-probe criterion (Phase 3c) is adopted instead — does not block the `base`-only pipeline. |
 | ρ_style = 0 breaks App. F's isotropy condition | Medium | §5.4.1 argues the break is in the benign direction — an infinitely fast dimension leaves the top of the spectrum rather than interleaving into it — but that is *our* reading, not the paper's. Treated as a falsifiable prediction: `R²(h → z_style) ≈ 0` is measured in every run, and the ρ_style sweep (§9 Phase 8) tests the predicted crossing at ρ_task². If style latents prove linearly decodable, the group split is wrong and gets rethought, not patched. |
 | `cube.size` confounds with camera distance under a single view | Medium | A larger cube further away renders near-identically to a smaller one nearer — non-injectivity of the same kind as §5.3's occlusion, introduced by the `full` group. Mitigated by the 2–3 cameras §5.3 already prescribes, and by keeping the size radius small relative to the depth range; the injectivity proxy in §10.1 is what would catch it. |
 | Bounded joints break Gaussianity of z | High | Absorbed tanh squash (§5.1). Never clip, never wrap. |
@@ -1165,7 +1183,7 @@ Two tracks, and they are independent.
 6. ~~Restart the pod once and confirm Isaac does not re-download assets.~~ **Done, properly — the pod was deleted and recreated, not just restarted.** A same-container restart wouldn't prove anything: the container's own ephemeral layer survives a restart regardless of whether relocation worked. The delete+recreate landed on a genuinely new container, and `bootstrap.sh` correctly re-created the `$HOME` symlinks from scratch (not `already linked` — that phrasing only applies to a same-container restart) pointing at the same `/idtb/cache/*` content as before. `preflight.sh` and `bootstrap.sh` both re-ran clean on the new pod, confirming both are safe to re-run on a fresh container, not just idempotent within one.
 7. ~~Run a shipped Isaac Lab tutorial headless, before running any of our code.~~ **Done — `create_empty.py --headless` completed (`[INFO]: Setup complete...`) on driver 580.159.04**, the first direct evidence against a driver-mismatch crash (§3.4.1's residual risk). **No PNG was produced** — this tutorial is scene composition, not rendering; the "look at the PNG" framing assumed the wrong tutorial. A real visual/rendering check is folded into Spike 1 (§7.2, "Render non-degenerate") rather than repeated here. One non-fatal oddity worth watching: Kit's `OmniHub` helper failed to launch and retried ~44 times (~14s) before giving up gracefully — harmless for this asset-free tutorial, but worth attention once a script streams a real Omniverse asset (the Franka, in the spike).
 8. Run Spikes 1–4 (§7.2). Record the answers in §3 and rewrite §7.3 with real preset definitions. This is also where the driver acceptance in §3.4.1 gets its real answer — a clean determinism result on this host is worth more than the driver number.
-8b. **Next pod session: Spike 5 round 2 (§7.5, docs/PLAN.md Phase 3c).** Four new, ordered experiments against the `full`/`style` non-determinism — RenderProduct attribute audit, disabling path-tracer caches/AA jitter, forcing cold accumulation per capture (IsaacLab#6609), and a `Minimal`-mode escape hatch — none of which overlap the four already-falsified fixes.
+8b. **Next pod session: Spike 5 round 2 (§7.5, docs/PLAN.md Phase 3c) — code written, needs a pod run.** `spikes/spike_dynamic_attrs.py` now has four independent, ordered experiments against the `full`/`style` non-determinism, none of which overlap the four already-falsified fixes: an always-on RenderProduct attribute audit, `--extra-preset caches_and_aa_off` (disable path-tracer caches/AA jitter), `--reset-pt-accum-on-time-change`/`--reset-cadence-per-capture`/`--capture-via app_update` (force cold accumulation per capture, IsaacLab#6609), and `--extra-preset {realtime_rtpt_caches_off,minimal}` (two escape-hatch render modes, one of them Isaac Lab's own built-in determinism recipe).
 9. Only then start on `stage_v1_tabletop.usd`.
 
 **Track B — build what needs no decisions (local, start now):**

@@ -48,6 +48,26 @@ renders deterministically but changes nothing visible is worse than useless:
 the encoder would score perfect invariance for free), and is it still bitwise
 deterministic under `standard`. :func:`run_knob_check` runs all three, in that
 order, for one attribute at a time.
+
+**Round 2 (docs/answer.md, docs/PLAN.md Phase 3c).** `cube.hue`, `light.*` and
+`cam.jitter` came back non-deterministic under `standard` and four targeted
+fixes were falsified (see README §7.5). An external research reply proposes a
+different mechanism -- path-tracer caches and AA jitter, not sample count --
+and names a version-matched candidate root cause
+(`IsaacLab#6609 <https://github.com/isaac-sim/IsaacLab/issues/6609>`_). Four
+new, independently togglable levers below (``--extra-preset``,
+``--reset-pt-accum-on-time-change``, ``--reset-cadence-per-capture``,
+``--capture-via``) test that, plus a standing diagnostic
+(``render_product_attribute_audit``) that runs every time. Every carb key and
+API name here was confirmed by reading real source -- Isaac Lab's own
+``isaaclab_physx.renderers.isaac_rtx_renderer_utils.apply_isaac_rtx_determinism_settings``,
+``isaaclab_physx.renderers.isaac_rtx_renderer`` (the ``omni:rtx:rendermode`` /
+``"Minimal"`` per-product attribute), IsaacLab#6609 itself (the exact
+``RenderContext`` method names), and OmniGibson's
+``renderer_settings/path_tracing_settings.py`` (the offline-PathTracing carb
+keys) -- not guessed, but never run against this scene either. ``none``/unset
+on all four preserves the exact Round-1 behaviour that produced README §7.5's
+verdict.
 """
 
 from __future__ import annotations
@@ -199,6 +219,30 @@ def diff_summary(a: Tensor, b: Tensor) -> dict[str, Any]:
     }
 
 
+def dump_render_product_rtx_attributes(prim: Any) -> dict[str, Any]:
+    """Every ``omni:rtx*``-namespaced attribute on a prim, name -> value.
+
+    Isaac Sim 6.x sets render mode and path-tracing parameters *per
+    RenderProduct* as USD attributes (``omni:rtx:rendermode``,
+    ``omni:rtx:pt:samplesPerPixel``, ...) -- a separate mechanism from the
+    global/deprecated carb keys ``standard`` sets. Reading a carb key back
+    only proves carb stored it, not that this camera's RenderProduct used it
+    (docs/answer.md, docs/PLAN.md Phase 3c experiment A). Takes any
+    ``Usd.Prim``-like object with ``GetAttributes()`` -- duck-typed so this is
+    testable without a live stage; the caller resolves the real prim.
+    """
+    values: dict[str, Any] = {}
+    for attr in prim.GetAttributes():
+        name = attr.GetName()
+        if not name.startswith("omni:rtx"):
+            continue
+        try:
+            values[name] = attr.Get()
+        except Exception as exc:
+            values[name] = f"<unreadable: {type(exc).__name__}: {exc}>"
+    return values
+
+
 # ---------------------------------------------------------------------------
 # Isaac layer: every import lives inside a function, after SimulationApp exists.
 # ---------------------------------------------------------------------------
@@ -254,6 +298,63 @@ MOTION_BLUR_CANDIDATES: dict[str, Any] = {
     "/rtx/post/motionblur/maxBlurDiameterFraction": 0.05,
 }
 
+# --- Round 2 (docs/answer.md, docs/PLAN.md Phase 3c) ------------------------
+# Every key below was confirmed by reading real source, not guessed -- see the
+# module docstring for exactly which file each one came from. Applied on top
+# of `pathtracing_denoiser_off` (build_rig), never by default.
+
+# Experiment B: offline PathTracing's own cross-frame caches and AA jitter,
+# none of which the four already-falsified fixes (README §7.5) touched.
+# Confirmed real carb keys (OmniGibson's renderer_settings/path_tracing_settings.py
+# enumerates Isaac Sim's actual PathTracing settings UI, incl. resetPtAccumOnAnimTimeChange
+# below) -- `adaptiveSampling/enabled` is the one key in this dict *not* corroborated
+# there; apply_carb_settings()'s read-back `accepted` flag is what tells the two apart.
+PATHTRACING_CACHES_AND_AA_OFF: dict[str, Any] = {
+    "/rtx/pathtracing/cached/enabled": False,
+    "/rtx/pathtracing/lightcache/cached/enabled": False,
+    "/rtx/pathtracing/adaptiveSampling/enabled": False,
+    "/rtx/pathtracing/fireflyFilter/enabled": False,
+    "/rtx/pathtracing/aa/op": 0,
+    "/rtx/pathtracing/aa/filterRadius": 0.0,
+}
+
+# Experiment D (partial) / an independent lead: Isaac Lab's own built-in
+# "deterministic rendering" recipe -- isaaclab_physx.renderers.isaac_rtx_renderer_utils.
+# apply_isaac_rtx_determinism_settings(), read directly from the isaac-sim/IsaacLab
+# source (not the offline `standard` preset's PathTracing mode at all): RealTimePathTracing
+# with its own *RTPT* cache namespace disabled -- `/rtx/rtpt/*`, distinct from
+# `/rtx/pathtracing/*`. Spike 1 (§7.2) measured as-booted RealTimePathTracing
+# non-deterministic, but never with these two caches off -- an untested combination,
+# not a rerun of that result.
+REALTIME_PATHTRACING_RTPT_CACHES_OFF: dict[str, Any] = {
+    "/rtx/rendermode": "RealTimePathTracing",
+    "/rtx/rtpt/cached/enabled": False,
+    "/rtx/rtpt/lightcache/cached/enabled": False,
+}
+
+# Experiment D: the escape hatch. "Minimal" is the exact render-mode string
+# Isaac Lab itself sets on a RenderProduct's `omni:rtx:rendermode` attribute
+# for its own low-cost shading path (isaaclab_physx.renderers.isaac_rtx_renderer);
+# applied here as a global carb value for a first cut, since a plain
+# `/rtx/rendermode` write has worked for every other mode switch this spike
+# and Spike 1 have tried. No Monte Carlo state, no caches, no accumulation.
+MINIMAL_RENDER_MODE: dict[str, Any] = {"/rtx/rendermode": "Minimal"}
+
+EXTRA_PRESETS: dict[str, dict[str, Any]] = {
+    "none": {},
+    "caches_and_aa_off": PATHTRACING_CACHES_AND_AA_OFF,
+    "realtime_rtpt_caches_off": REALTIME_PATHTRACING_RTPT_CACHES_OFF,
+    "minimal": MINIMAL_RENDER_MODE,
+}
+
+# Experiment C, part 1: forces the path tracer to treat every capture as a
+# fresh scene instead of relying on change detection to notice one -- the
+# accumulation restart research doc's leading theory says is
+# change-detection-driven, i.e. exactly the mechanism that would need an
+# actual animation-time change to fire, which this pipeline's zero-`sim.step()`
+# policy (README §5.5) never produces.
+RESET_ACCUM_ON_TIME_CHANGE: dict[str, Any] = {"/rtx/resetPtAccumOnAnimTimeChange": True}
+
 
 @dataclass
 class Rig:
@@ -266,6 +367,8 @@ class Rig:
     cube_shader: Any  # UsdShade.Shader, or None if binding resolution failed
     light_prim: Any
     notes: dict[str, Any]
+    render_tick: Callable[[], None]
+    reset_cadence: Callable[[], None] | None = None
 
 
 def build_rig(args: argparse.Namespace) -> Rig:
@@ -359,6 +462,30 @@ def build_rig(args: argparse.Namespace) -> Rig:
         "settings": apply_preset("pathtracing_denoiser_off"),
     }
 
+    # -- Round 2 (docs/PLAN.md Phase 3c) -- every lever below is opt-in via a
+    # CLI flag and defaults to a no-op, so an unflagged run reproduces exactly
+    # the Round-1 configuration that produced README §7.5's verdict. --------
+    extra_preset_name = getattr(args, "extra_preset", "none")
+    if extra_preset_name != "none":
+        notes["extra_preset"] = {
+            "name": extra_preset_name,
+            "settings": apply_carb_settings(EXTRA_PRESETS[extra_preset_name]),
+        }
+
+    if getattr(args, "reset_pt_accum_on_time_change", False):
+        notes["reset_pt_accum_on_time_change"] = apply_carb_settings(RESET_ACCUM_ON_TIME_CHANGE)
+
+    if getattr(args, "reset_cadence_per_capture", False):
+        cadence_desc, cadence_fn = resolve_cadence_reset(sim)
+    else:
+        cadence_desc, cadence_fn = "disabled (--reset-cadence-per-capture not set)", None
+    notes["reset_cadence_per_capture"] = cadence_desc
+
+    render_tick, render_tick_desc = resolve_render_tick(
+        getattr(args, "capture_via", "sim_render"), sim
+    )
+    notes["capture_via"] = render_tick_desc
+
     rig = Rig(
         sim=sim,
         device=str(sim.device),
@@ -367,6 +494,8 @@ def build_rig(args: argparse.Namespace) -> Rig:
         cube_shader=cube_shader,
         light_prim=light_prim,
         notes=notes,
+        render_tick=render_tick,
+        reset_cadence=cadence_fn,
     )
     aim_camera(rig, jitter_xy=BASE_CAMERA_JITTER)
     camera.update(dt=0.0, force_recompute=True)
@@ -440,6 +569,93 @@ def describe_prim_tree(root_prim: Any) -> list[str]:
         bound = material.GetPath().pathString if material else None
         lines.append(f"{prim.GetPath()} [{prim.GetTypeName()}] bound_material={bound}")
     return lines
+
+
+def resolve_render_tick(mode: str, sim: Any) -> tuple[Callable[[], None], str]:
+    """The per-``depth``-iteration render call inside the capture loop.
+
+    ``--capture-via app_update`` is docs/PLAN.md Phase 3c experiment C's third
+    lever: swap ``sim.render()`` for ``omni.kit.app.get_app().update()``, in
+    case the two tick the render graph differently. ``sim_render`` (the
+    default) is exactly what Spike 1 and Round 1 of this spike already used --
+    unchanged unless the flag is passed.
+    """
+    if mode == "app_update":
+        import omni.kit.app
+
+        app = omni.kit.app.get_app()
+        return app.update, "omni.kit.app.get_app().update()"
+    return sim.render, "sim.render()"
+
+
+def resolve_cadence_reset(sim: Any) -> tuple[str, Callable[[], None] | None]:
+    """Locate `IsaacLab#6609 <https://github.com/isaac-sim/IsaacLab/issues/6609>`_'s
+    cadence-invalidation call on this build's ``SimulationContext``.
+
+    Confirmed real API, not guessed: the issue's own reproduction reads
+    ``env.sim.render_context._last_scene_state_step`` and its fix is
+    ``RenderContext.reset_transform_cadence()`` (public since patch1 -- our
+    exact Isaac Lab release) or ``reset_scene_state_cadence()`` (the eventual
+    upstream fix, possibly not on this build yet). The bug's trigger is
+    exactly our capture loop: ``sim.forward()`` with the physics-step count
+    never advanced (README §5.5's zero-``sim.step()`` policy). Records which
+    name answered, or that neither is reachable, rather than guessing a third.
+    """
+    render_context = getattr(sim, "render_context", None)
+    if render_context is None:
+        return "sim.render_context not found on this build", None
+    for name in ("reset_transform_cadence", "reset_scene_state_cadence"):
+        method = getattr(render_context, name, None)
+        if callable(method):
+            return f"sim.render_context.{name}()", method
+    return (
+        "sim.render_context found but neither reset_transform_cadence nor "
+        "reset_scene_state_cadence is callable on it",
+        None,
+    )
+
+
+def resolve_render_product_path(rig: Rig) -> tuple[str, str]:
+    """The USD prim path of the camera's RenderProduct -- for experiment A's audit.
+
+    No single accessor is confirmed across Isaac Lab's renderer backends: the
+    PhysX backend stores it at ``camera._render_data.render_product.path``
+    (``isaaclab_physx.renderers.isaac_rtx_renderer.IsaacRtxRenderData``), the
+    OV/OVRTX backend instead at ``camera._renderer._render_product_paths[0]``
+    (``isaaclab_ov.renderers.ovrtx_renderer.OVRTXRenderer``), and some releases
+    expose a public ``camera.render_product_paths``. Tried in that order, with
+    a schema-level fallback that doesn't depend on internal attribute names at
+    all: search the whole stage for a ``UsdRender.Product`` prim, which any
+    backend must create for Hydra to render through.
+    """
+    camera = rig.camera
+
+    def via_public_attr() -> str:
+        return camera.render_product_paths[0]
+
+    def via_physx_render_data() -> str:
+        return camera._render_data.render_product.path
+
+    def via_ov_renderer_paths() -> str:
+        return camera._renderer._render_product_paths[0]
+
+    def via_stage_search() -> str:
+        from pxr import Usd, UsdRender
+
+        stage = rig.cube_prim.GetStage()
+        for prim in Usd.PrimRange(stage.GetPseudoRoot()):
+            if prim.IsA(UsdRender.Product):
+                return prim.GetPath().pathString
+        raise RuntimeError("no UsdRender.Product prim found on the stage")
+
+    return try_candidates(
+        [
+            ("camera.render_product_paths", via_public_attr),
+            ("physx_render_data.render_product.path", via_physx_render_data),
+            ("ov_renderer._render_product_paths", via_ov_renderer_paths),
+            ("stage_search_UsdRender.Product", via_stage_search),
+        ]
+    )
 
 
 def aim_camera(rig: Rig, *, jitter_xy: tuple[float, float]) -> None:
@@ -617,13 +833,23 @@ def make_capture_static(rig: Rig, *, depth: int = 1) -> Capture:
     finishing within a single render call. ``depth`` is a CLI flag
     (``--render-depth``) for exactly that reason -- it's an open question,
     not a constant.
+
+    The render tick itself (``rig.render_tick``, ``sim.render()`` by default)
+    and an optional cadence-invalidation call before it (``rig.reset_cadence``)
+    are both resolved once in :func:`build_rig` from CLI flags -- docs/PLAN.md
+    Phase 3c experiment C.
     """
 
     def capture(_state: Any) -> Tensor:
         rig.sim.forward()
+        if rig.reset_cadence is not None:
+            # Experiment C (docs/PLAN.md Phase 3c): invalidate IsaacLab#6609's
+            # scene-state cadence on every capture, matching the bug's exact
+            # trigger -- forward() with no sim.step() to advance the count.
+            rig.reset_cadence()
         rig.camera.update(dt=0.0, force_recompute=True)
         for _ in range(depth):
-            rig.sim.render()
+            rig.render_tick()
         rig.camera.update(dt=0.0, force_recompute=True)
         return rig.camera.data.output["rgb"]
 
@@ -748,6 +974,36 @@ def main() -> int:
         "representative knobs, as <out>/frames/*.pt -- so the back-to-back noise found "
         "on cube.hue/light.*/cam.jitter can be inspected directly instead of guessed at",
     )
+    parser.add_argument(
+        "--extra-preset",
+        choices=sorted(EXTRA_PRESETS),
+        default="none",
+        help="docs/PLAN.md Phase 3c: an additional carb config applied once at scene "
+        "build, on top of `pathtracing_denoiser_off`. 'none' (default) reproduces "
+        "exactly the Round-1 configuration that produced README §7.5's verdict; "
+        "'caches_and_aa_off' is experiment B, 'realtime_rtpt_caches_off' and 'minimal' "
+        "are experiment D's two candidates.",
+    )
+    parser.add_argument(
+        "--reset-pt-accum-on-time-change",
+        action="store_true",
+        help="docs/PLAN.md Phase 3c experiment C: set "
+        "/rtx/resetPtAccumOnAnimTimeChange=True once at scene build.",
+    )
+    parser.add_argument(
+        "--reset-cadence-per-capture",
+        action="store_true",
+        help="docs/PLAN.md Phase 3c experiment C: call IsaacLab#6609's cadence-"
+        "invalidation method (sim.render_context.reset_transform_cadence() or "
+        "reset_scene_state_cadence()) before every capture's render step.",
+    )
+    parser.add_argument(
+        "--capture-via",
+        choices=["sim_render", "app_update"],
+        default="sim_render",
+        help="docs/PLAN.md Phase 3c experiment C: swap the capture loop's render tick "
+        "from sim.render() (default) to omni.kit.app.get_app().update().",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
 
@@ -810,6 +1066,36 @@ def main() -> int:
             return facts
 
         report.run("scene_builds_and_measures", check_scene)
+
+        # -- experiment A: is `standard` even the config the render path reads? ---
+        def check_render_product_audit() -> dict[str, Any]:
+            current = need_rig()
+            via, product_path = resolve_render_product_path(current)
+            stage = current.cube_prim.GetStage()
+            prim = stage.GetPrimAtPath(product_path)
+            per_product = (
+                dump_render_product_rtx_attributes(prim) if prim and prim.IsValid() else {}
+            )
+            facts = {
+                "render_product_path": product_path,
+                "resolved_via": via,
+                "per_product_omni_rtx_attributes": per_product,
+                "carb_preset_applied": current.notes.get("preset_applied"),
+                "carb_extra_preset": current.notes.get("extra_preset"),
+                "note": "compares the per-RenderProduct omni:rtx:* attributes Isaac Sim 6.x "
+                "actually reads against the global/deprecated carb keys `standard` sets -- "
+                "carb accepting a key only proves carb stored it, not that this camera's "
+                "render path used it (docs/answer.md, docs/PLAN.md Phase 3c experiment A)",
+            }
+            if not per_product:
+                raise CheckFailed(
+                    f"resolved a RenderProduct prim at {product_path!r} via {via!r} but it "
+                    "carries no omni:rtx:* attributes -- either carb settings are the only "
+                    "mechanism actually reachable on this build, or this is the wrong prim"
+                )
+            return facts
+
+        report.run("render_product_attribute_audit", check_render_product_audit)
 
         # -- cube.size --------------------------------------------------------
         def check_cube_scale() -> dict[str, Any]:

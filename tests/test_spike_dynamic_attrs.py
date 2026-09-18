@@ -218,6 +218,140 @@ def test_diff_summary_distinguishes_uniform_shift_from_localized_spike():
     assert localized_summary["fraction_pixels_changed_gt_1"] == pytest.approx(1.0 / 48.0)
 
 
+# --- dump_render_product_rtx_attributes: experiment A's diagnostic filter ------
+
+
+class _FakeAttr:
+    def __init__(self, name, value, *, raises=False):
+        self._name = name
+        self._value = value
+        self._raises = raises
+
+    def GetName(self):
+        return self._name
+
+    def Get(self):
+        if self._raises:
+            raise RuntimeError("boom")
+        return self._value
+
+
+class _FakePrim:
+    def __init__(self, attrs):
+        self._attrs = attrs
+
+    def GetAttributes(self):
+        return self._attrs
+
+
+def test_dump_render_product_rtx_attributes_filters_by_namespace():
+    prim = _FakePrim(
+        [
+            _FakeAttr("omni:rtx:rendermode", "PathTracing"),
+            _FakeAttr("omni:rtx:pt:samplesPerPixel", 1),
+            _FakeAttr("xformOp:translate", (0.0, 0.0, 0.0)),
+        ]
+    )
+    values = spike.dump_render_product_rtx_attributes(prim)
+    assert values == {"omni:rtx:rendermode": "PathTracing", "omni:rtx:pt:samplesPerPixel": 1}
+
+
+def test_dump_render_product_rtx_attributes_records_unreadable_attrs_without_raising():
+    prim = _FakePrim([_FakeAttr("omni:rtx:broken", None, raises=True)])
+    values = spike.dump_render_product_rtx_attributes(prim)
+    assert "omni:rtx:broken" in values
+    assert "unreadable" in values["omni:rtx:broken"]
+
+
+def test_dump_render_product_rtx_attributes_empty_prim_is_empty_dict():
+    assert spike.dump_render_product_rtx_attributes(_FakePrim([])) == {}
+
+
+# --- Round 2 preset registry (docs/PLAN.md Phase 3c) ----------------------------
+
+
+def test_extra_presets_include_a_none_noop_default():
+    """`none` must be a real, empty no-op -- an unflagged run has to reproduce
+    exactly the Round-1 configuration that produced README §7.5's verdict.
+    """
+    assert spike.EXTRA_PRESETS["none"] == {}
+
+
+def test_extra_presets_render_mode_overrides_are_distinct_strings():
+    """`realtime_rtpt_caches_off` and `minimal` each pick a different
+    `/rtx/rendermode` -- if these ever collided, experiment D's two candidates
+    would silently test the same thing twice.
+    """
+    modes = {
+        name: preset["/rtx/rendermode"]
+        for name, preset in spike.EXTRA_PRESETS.items()
+        if "/rtx/rendermode" in preset
+    }
+    assert len(set(modes.values())) == len(modes)
+
+
+def test_reset_accum_on_time_change_is_a_single_bool_key():
+    assert spike.RESET_ACCUM_ON_TIME_CHANGE == {"/rtx/resetPtAccumOnAnimTimeChange": True}
+
+
+# --- resolve_cadence_reset: IsaacLab#6609's cadence-invalidation lookup ---------
+
+
+class _FakeRenderContext:
+    def __init__(self, **methods):
+        for name, fn in methods.items():
+            setattr(self, name, fn)
+
+
+class _FakeSim:
+    def __init__(self, render_context=None):
+        self.render_context = render_context
+
+
+def test_resolve_cadence_reset_prefers_reset_transform_cadence():
+    calls = []
+    sim = _FakeSim(
+        _FakeRenderContext(
+            reset_transform_cadence=lambda: calls.append("transform"),
+            reset_scene_state_cadence=lambda: calls.append("scene_state"),
+        )
+    )
+    name, fn = spike.resolve_cadence_reset(sim)
+    assert name == "sim.render_context.reset_transform_cadence()"
+    fn()
+    assert calls == ["transform"]
+
+
+def test_resolve_cadence_reset_falls_back_to_reset_scene_state_cadence():
+    sim = _FakeSim(_FakeRenderContext(reset_scene_state_cadence=lambda: None))
+    name, fn = spike.resolve_cadence_reset(sim)
+    assert name == "sim.render_context.reset_scene_state_cadence()"
+    assert fn is not None
+
+
+def test_resolve_cadence_reset_reports_missing_render_context():
+    name, fn = spike.resolve_cadence_reset(_FakeSim(render_context=None))
+    assert fn is None
+    assert "render_context not found" in name
+
+
+def test_resolve_cadence_reset_reports_render_context_without_either_method():
+    name, fn = spike.resolve_cadence_reset(_FakeSim(_FakeRenderContext()))
+    assert fn is None
+    assert "neither reset_transform_cadence nor reset_scene_state_cadence" in name
+
+
+# --- resolve_render_tick: the capture loop's render-tick lever -------------------
+
+
+def test_resolve_render_tick_defaults_to_sim_render():
+    sim = _FakeSim()
+    sim.render = lambda: "rendered"
+    fn, desc = spike.resolve_render_tick("sim_render", sim)
+    assert fn is sim.render
+    assert desc == "sim.render()"
+
+
 # --- reused pure layer, sanity that the load actually worked --------------------
 
 
