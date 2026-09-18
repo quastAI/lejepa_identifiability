@@ -1017,7 +1017,11 @@ def run_knob_check(rig: Rig, knob: KnobCheck, *, depth: int = 1) -> dict[str, An
 
     knob.write(knob.base_value)  # leave the rig as found for whichever check runs next
     if problems:
-        raise CheckFailed("; ".join(problems))
+        # `facts` attached: a FAIL is exactly when the sensitivity/determinism
+        # numbers behind the message matter most, and Report.run() previously
+        # discarded them on every failing check -- fixed at the source
+        # (spike_api.CheckFailed), not patched around here.
+        raise CheckFailed("; ".join(problems), facts=facts)
     return facts
 
 
@@ -1179,7 +1183,8 @@ def main() -> int:
                 raise CheckFailed(
                     f"resolved a RenderProduct prim at {product_path!r} via {via!r} but it "
                     "carries no omni:rtx:* attributes -- either carb settings are the only "
-                    "mechanism actually reachable on this build, or this is the wrong prim"
+                    "mechanism actually reachable on this build, or this is the wrong prim",
+                    facts=facts,
                 )
             return facts
 
@@ -1291,7 +1296,8 @@ def main() -> int:
             if len(clipped_low) == len(samples) or len(clipped_high) == len(samples):
                 raise CheckFailed(
                     "every candidate intensity clips at one end -- no usable range "
-                    f"found in {INTENSITY_CANDIDATES_FOR_CLIPPING}, widen it"
+                    f"found in {INTENSITY_CANDIDATES_FOR_CLIPPING}, widen it",
+                    facts=facts,
                 )
             return facts
 
@@ -1446,13 +1452,15 @@ def main() -> int:
             if not accepted:
                 raise CheckFailed(
                     "no candidate exposure setting was accepted on this build -- readback "
-                    f"{exposure_readback}; the handle is dropped, not faked (README §5.2.3)"
+                    f"{exposure_readback}; the handle is dropped, not faked (README §5.2.3)",
+                    facts=facts,
                 )
             if mad <= 0.0:
                 raise CheckFailed(
                     f"exposure settings {list(accepted)} were accepted by carb but changed "
                     f"nothing in the rendered frame (mad={mad:.4g}) -- a dead lever, same as no "
-                    "lever"
+                    "lever",
+                    facts=facts,
                 )
             return facts
 
@@ -1484,7 +1492,8 @@ def main() -> int:
                 raise CheckFailed(
                     f"size-then-hue vs hue-then-size differ (mad={mad:.4g}) -- USD "
                     "attribute writes are order-dependent here; the writer needs a "
-                    "fixed canonical order"
+                    "fixed canonical order",
+                    facts=facts,
                 )
             return facts
 
@@ -1527,7 +1536,8 @@ def main() -> int:
                 raise CheckFailed(
                     f"writing style knobs moved the cube's own transform by {delta:.3g} m -- "
                     "a camera re-aim, light write, or exposure setting must never perturb "
-                    "task latents"
+                    "task latents",
+                    facts=facts,
                 )
             return facts
 
@@ -1542,13 +1552,19 @@ def main() -> int:
             second = capture(None).clone()
             mad = mean_abs_diff(first, second)
             apply_carb_settings({k: False for k in MOTION_BLUR_CANDIDATES if "enabled" in k})
+            facts = {
+                "mad": mad,
+                "blur_settings": blur_settings,
+                "preset_applied": current.notes.get("preset_applied"),
+            }
             raise CheckFailed(
                 f"no motion-blur artefact between two captures of the same teleported "
                 f"state (mad={mad:.4g}; blur settings {blur_settings}, "
                 f"preset {current.notes.get('preset_applied')}) "
                 "-- expected, not a bug: motion blur needs velocity across frames and this "
                 "pipeline has none by design (README §5.5). Recorded as a completed check, "
-                "same category as Spike 1's aliasing FAIL."
+                "same category as Spike 1's aliasing FAIL.",
+                facts=facts,
             )
 
         report.run("motion_blur_under_teleport_no_step", check_motion_blur)

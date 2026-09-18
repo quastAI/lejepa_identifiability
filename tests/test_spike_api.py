@@ -373,6 +373,32 @@ def test_report_never_lets_one_check_stop_the_rest():
     assert "RuntimeError" in exploded.note
 
 
+def test_check_failed_facts_survive_into_the_report():
+    """A FAIL used to discard whatever the check had already computed --
+    ``Report.run()`` built the ``CheckResult`` from just the exception's
+    message, and ``facts`` defaulted to ``{}``. That's backwards: a FAIL is
+    exactly when the diagnostic numbers behind the message matter most, and
+    every failing check in a real spike run was silently losing them. Fixed at
+    ``CheckFailed`` itself, not patched around at each call site.
+    """
+    report = spike.Report(verbose=False)
+
+    def failing_with_evidence():
+        raise spike.CheckFailed(
+            "answered, and the answer is no", facts={"mad": 1.86, "noise_floor": 0.2}
+        )
+
+    report.run("failed", failing_with_evidence)
+
+    assert report.facts_of("failed") == {"mad": 1.86, "noise_floor": 0.2}
+
+
+def test_check_failed_without_facts_still_defaults_to_empty():
+    with pytest.raises(spike.CheckFailed) as excinfo:
+        raise spike.CheckFailed("no evidence to attach")
+    assert excinfo.value.facts == {}
+
+
 def test_report_serialises_for_facts_json():
     report = spike.Report(verbose=False)
     report.run("measured", lambda: {"value": 3})

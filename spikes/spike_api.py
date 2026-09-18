@@ -71,7 +71,18 @@ os.environ.setdefault("OMNICLIENT_HUB_MODE", "disabled")
 
 
 class CheckFailed(Exception):
-    """A check ran and the answer was no. Not an error -- a result."""
+    """A check ran and the answer was no. Not an error -- a result.
+
+    Carries whatever facts were computed before the failure was detected, so a
+    caller doesn't have to choose between raising a clear failure message and
+    keeping the diagnostic numbers that explain it -- both matter equally for
+    a FAIL, arguably more than for a PASS. ``Report.run()`` attaches these to
+    the ``CheckResult`` the same way a successful check's return value is.
+    """
+
+    def __init__(self, message: str, *, facts: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.facts: dict[str, Any] = facts or {}
 
 
 class CheckSkipped(Exception):
@@ -303,7 +314,7 @@ class Report:
         except CheckSkipped as exc:
             result = CheckResult(name, "SKIP", 0.0, str(exc))
         except CheckFailed as exc:
-            result = CheckResult(name, "FAIL", 0.0, str(exc))
+            result = CheckResult(name, "FAIL", 0.0, str(exc), exc.facts)
         except Exception:
             # An unexpected exception is a FAIL with evidence, never a crash:
             # one boot, one full report.
