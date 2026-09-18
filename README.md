@@ -54,14 +54,14 @@ The purpose of this section is to keep the plan honest about the difference betw
 |---|---|
 | Latents are exactly Gaussian; boundedness handled by an absorbed `tanh` squash | §5.1. Preserves Theorem 1's premise and injectivity of *g*. |
 | A single scalar ρ shared across all latent dimensions | §5.4. Required for simultaneous (non-sequential) identifiability, per the paper's Appendix F. |
-| State is written by teleport; no policy rollout, no physics settling by default | §5.5. Keeps *g* deterministic and injective. **Confirmed, not just assumed** — Spike 2 (§7.2) measured zero-`sim.step()` read-back to `0.0` rad / `1.8×10⁻⁷` m error, 2026-09-16. |
+| State is written by teleport; no policy rollout, no dynamics settling | §5.5. Keeps *g* deterministic and injective. **Revised, 2026-09-18**: Spike 2 measured zero-`sim.step()` read-back correct, but that only proved the tensor buffer updates, not the render — a live camera stayed frozen without a real step. `write_latent_state()` now calls a real `sim.step(render=False)` with the joint position *target* set to the same value, so nothing settles/integrates; zero drift measured on the states tested (§5.5). |
 | Isaac Lab is used for the asset/state layer; raw `carb` settings for the render layer | §4.4. Isaac Lab gives batched tensorised state writes with read-back; it does not expose path-tracing controls. |
 | **`standard` preset: `PathTracing`, `spp=1`, `totalSpp=64`, denoiser off** | §7.2 Spike 1 + §7.3. The as-booted default (`RealTimePathTracing`) measured non-deterministic (`order_independent_mad ≈ 48`, not bitwise); this exact carb configuration measured bitwise-deterministic on both order-independence and back-to-back checks. `debug` and `photoreal` remain open candidates (§7.3). |
 | **Accumulation depth N is the `totalSpp` carb setting, not a `sim.render()` loop count** | §7.2 Spike 3. Under `standard`'s settings, every depth from 1 to 64 external render calls read back bitwise identical — the renderer's own accumulation completes inside one call once `totalSpp` is set. One render call per capture suffices; re-measure on scene v1 per §7.4's closing note, since N almost certainly changes with scene complexity even though the *mechanism* (it's `totalSpp`, not a loop) will not. |
 | **`TiledCamera` is safe to use** | §7.2 Spike 4. Identical frame statistics to `Camera`, and correctly distinguishes two envs holding different states — no sign of [IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)'s tile corruption on this build. Worth the throughput win with no observed downside. |
 | **Isaac's camera sensor output is an aliased, reused buffer — always `.clone()` immediately** | §7.2 Spike 1 (unplanned finding). `camera.data.output[...]` returns the same underlying tensor across calls, on every render mode tried; a caller that doesn't clone before the next capture silently observes the wrong frame. Permanent constraint on `writer.py`/`generate.py`, not a settings choice. |
-| The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. **Built, Phase 4** — `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`. |
-| **`IsaacSceneBackend` is built, not yet run on the pod** | Phase 4 (docs/PLAN.md), built once Phase 3d's table verdict landed. `src/idtb/sim/{app,render,writer,scene}.py`. Declares support for exactly what §7.2/§7.5 confirmed — `base`, `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter`, `exposure`, `table.albedo` — and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError`, since all three are confirmed **blocked**: writable, exact, bitwise-deterministic, but zero measurable pixel effect (§7.5). Written blind like every other Isaac-facing file in this project: every individual API call was verified in isolation, but combining a Franka arm with every attribute write in one scene has never been run together. Registered behind `@pytest.mark.isaac` in the tier-1 contract suite (`tests/contract/`), deselected by default. |
+| The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. **Built** — `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`. |
+| **`IsaacSceneBackend` is built and run on the pod — tier-1 contract suite green** | `src/idtb/sim/{app,render,writer,scene}.py`. Declares support for exactly what §7.2/§7.5 confirmed — `base`, `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter`, `exposure`, `table.albedo` — and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError`, since all three are confirmed **blocked** (§7.5). Combining a Franka arm with every attribute write in one scene surfaced real defects the spikes' isolated checks couldn't: a `FabricFrameView` prim-path gap, a `SimulationApp` teardown crash, and — the deepest one — physics writes never reaching the render at all without a real `sim.step()`, and a kinematic cube's tensor-API pose write separately breaking its own material rendering (§5.5). All fixed; `pytest -m isaac` — 30 passed, 2 skipped, 0 failed. One open, scoped finding carried forward: `cube.y`'s render signal is real but weak from this single camera's angle and was observed dropping to exactly zero under enough compounding attribute writes in one session — evidence *for* the §5.3 multi-view mitigation, tracked in §11, not yet root-caused further. |
 | Tests accompany every module; the §10.1 correctness gates are executable tests | §10.3. |
 | One installable package `src/idtb/`, never top-level `sim`/`gen`/`eval` | Those names collide with Kit extensions on Isaac's `sys.path`, and `eval` shadows a builtin. §4.6. |
 | Handles are keyed by **role** (`arm.j0`, `cube.x`), not by Franka joint name | §6.2. A spec keyed on asset-specific names cannot be shared with the mock, which makes the tier-1 contract suite impossible. |
@@ -91,7 +91,7 @@ The purpose of this section is to keep the plan honest about the difference betw
 | ~~Which `full`/`style` knobs are writable at all, and through which API call~~ | **Resolved, §7.5.** `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter` are all writable and bitwise-deterministic under the revised `standard` (adds `resetPtAccumOnAnimTimeChange=True`). `light.azimuth_elevation` is writable (confirmed exact via read-back) but has no measurable effect on the render in any tested config — blocked, scoped to this spike scene's `DistantLight`, re-test against scene v1's light rig before deciding its fate (§11). | — |
 | **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the determinism blocker (§7.5) is resolved for every handle except `light.azimuth_elevation` and `table.roughness`, so this is open work now, not blocked work. | Phase 3 / Phase 2 |
 | ~~Whether `exposure` has a usable lever at all~~ | **Resolved, §7.5.** Three carb keys accepted and measured to move pixels, and bitwise-deterministic under the revised `standard`. | — |
-| ~~Whether `table.roughness`/`table.albedo` are writable and bitwise-deterministic~~ | **Resolved, §7.5 (docs/PLAN.md Phase 3d).** `table.albedo` writable, bitwise-deterministic, responsive — joins the Phase 4 backend's supported set. `table.roughness` writable and bitwise-deterministic but zero measurable pixel effect — blocked, scoped to this spike scene, next to `light.azimuth_elevation` (§11). | — |
+| ~~Whether `table.roughness`/`table.albedo` are writable and bitwise-deterministic~~ | **Resolved, §7.5.** `table.albedo` writable, bitwise-deterministic, responsive — joins the backend's supported set. `table.roughness` writable and bitwise-deterministic but zero measurable pixel effect — blocked, scoped to this spike scene, next to `light.azimuth_elevation` (§11). | — |
 
 The four Spike questions that used to live in this table (render mode/preset, physics-step requirement, accumulation depth N, `TiledCamera` vs. `Camera`) are all answered — moved to §3.1, §7.2.
 
@@ -174,7 +174,7 @@ Two architectural properties matter:
 
 ### 4.3 The backend seam
 
-Defined in `src/idtb/sim/backend.py` — pure Python, zero Isaac imports, **built in Phase 4**:
+Defined in `src/idtb/sim/backend.py` — pure Python, zero Isaac imports, **built**:
 
 ```python
 class SceneBackend(Protocol):
@@ -188,7 +188,7 @@ class SceneBackend(Protocol):
 ```
 
 - **`MockSceneBackend`** (`src/idtb/sim/mock.py`, **built**) — an analytic numpy renderer: anti-aliased sprites for the cube (position/size/hue) and a joint-driven arm marker, plus a global style tone (light, camera jitter, table, exposure). Deterministic and injective *by construction*, no RNG anywhere.
-- **`IsaacSceneBackend`** (`src/idtb/sim/scene.py`, plus `app.py`/`render.py`/`writer.py`) — real, lazy-imports Isaac, runs remotely. **Built (§3.1, docs/PLAN.md Phase 4), not yet run on the pod.** `bind()` declares support for exactly the roles §7.2/§7.5 confirmed and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError` — all three are confirmed **blocked**, not merely unverified. §7.4 already predicts this backend gets rewritten once scene v1 replaces the spike scene's light rig and table material.
+- **`IsaacSceneBackend`** (`src/idtb/sim/scene.py`, plus `app.py`/`render.py`/`writer.py`) — real, lazy-imports Isaac, runs remotely. **Built and run on the pod (§3.1); tier-1 contract suite green.** `bind()` declares support for exactly the roles §7.2/§7.5 confirmed and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError` — all three are confirmed **blocked**, not merely unverified. §7.4 already predicts this backend gets rewritten once scene v1 replaces the spike scene's light rig and table material.
 
 The mock is not a convenience. It does two jobs:
 
@@ -202,11 +202,11 @@ Deliberately small. This is the complete list; anything outside it is out of sco
 **Boot** — `src/idtb/sim/app.py`, the only module permitted to do this
 - `isaaclab.app.AppLauncher`, `AppLauncher.add_app_launcher_args(parser)`, `app_launcher.app`, `simulation_app.close()`
 - Flags: `headless=True`, `enable_cameras=True` (required for sensor rendering in standalone scripts), `renderer=…`
-- ⚠ **`AppLauncher`/`SimulationApp` reads `sys.argv` directly, independent of the `args` object passed to its constructor.** Confirmed on the pod (docs/PLAN.md Phase 4): booting from inside a `pytest` process leaves `sys.argv` full of pytest's own flags, which Kit's native CLI parser cannot parse — and it fails by **segfaulting the whole process**, not raising a catchable exception (`[Error] [omni.kit.app.plugin] Ill formed parameter: -m` in the native traceback right before the crash). Every script-style entry point here was unaffected only because its own argv already happened to be Kit-parseable. `idtb.sim.app.launch()` scrubs `sys.argv` to just the program name for the duration of the boot call as the fix.
+- ⚠ **`AppLauncher`/`SimulationApp` reads `sys.argv` directly, independent of the `args` object passed to its constructor.** Confirmed on the pod: booting from inside a `pytest` process leaves `sys.argv` full of pytest's own flags, which Kit's native CLI parser cannot parse — and it fails by **segfaulting the whole process**, not raising a catchable exception (`[Error] [omni.kit.app.plugin] Ill formed parameter: -m` in the native traceback right before the crash). Every script-style entry point here was unaffected only because its own argv already happened to be Kit-parseable. `idtb.sim.app.launch()` scrubs `sys.argv` to just the program name for the duration of the boot call as the fix.
 
 **Simulation context**
 - `isaaclab.sim.SimulationCfg`, `RenderCfg`, `SimulationContext`
-- `sim.reset()`, `sim.render()`, `sim.step(render=False)`, `sim.forward()`
+- `sim.reset()`, `sim.render()`, `sim.step(render=False)` — the actual capture-sequence sync (§4.5); `sim.forward()` looked like the lighter option but doesn't republish a tensor-API write to a live camera (§5.5)
 
 **Scene and assets**
 - `isaaclab.scene.InteractiveScene`, `InteractiveSceneCfg`; `scene["robot"]`, `scene.env_origins`, `scene.write_data_to_sim()`, `scene.update(dt)`
@@ -215,13 +215,12 @@ Deliberately small. This is the complete list; anything outside it is out of sco
 
 **State write** — signatures verified against `articulation.py` on `main`
 - `robot.write_joint_state_to_sim(position, velocity, joint_ids=None, env_ids=None)` — shapes `(len(env_ids), len(joint_ids))`
-- `robot.write_root_pose_to_sim(root_pose, env_ids=None)` — `(B, 7)`, position + quaternion **(w, x, y, z)**, **world frame**
-- `obj.write_root_state_to_sim(root_state, env_ids=None)` — `(B, 13)`
-- `obj.write_root_velocity_to_sim(...)` — zeroed on every write
+- `robot.set_joint_position_target(position, ...)` — the PD target, written alongside the state above so nothing drifts during the `sim.step()` §4.5 needs (§5.5)
+- `obj.write_root_pose_to_sim(root_pose, env_ids=None)` / `obj.write_root_state_to_sim(...)` / `obj.write_root_velocity_to_sim(...)` — real, valid Isaac Lab API, but **not what this project uses for the cube**: a `RigidObjectCfg`'s root-pose write permanently breaks that prim's later material rendering once combined with `sim.step()` (§5.5). Kept here as documentation of what exists, not as this project's chosen path for a rigid body's position.
 - Index resolution: `robot.find_joints(["panda_joint1", …])`. **Joint indices are never hardcoded.**
 
 **Read-back** — the gate
-- `robot.data.joint_pos`, `cube.data.root_pos_w`, `cube.data.root_quat_w`, `robot.data.default_joint_pos`, `cube.data.default_root_state`
+- `robot.data.joint_pos`, `robot.data.default_joint_pos` — the tensor buffers. The cube's position is **not** read from `cube.data.root_pos_w` (that RigidObject API path is unused, see above) — it's read back from the same USD translate op it's written through (`idtb.sim.writer.read_cube_position`).
 
 **Cameras**
 - `isaaclab.sensors.CameraCfg` / `Camera` / `TiledCamera`, `CameraCfg.OffsetCfg`, `sim_utils.PinholeCameraCfg`
@@ -239,19 +238,26 @@ Deliberately small. This is the complete list; anything outside it is out of sco
 
 ### 4.5 The capture sequence
 
-This ordering is the part that must be exactly right.
+This ordering is the part that must be exactly right — and it changed once, materially, after §7.2's spikes were measured (see §5.5's revision history for why).
 
 ```
-write_joint_state_to_sim / write_root_pose_to_sim
+write_joint_state_to_sim(joint_pos)            # arm/gripper
+set_joint_position_target(joint_pos)           # same value -- zero PD error at the step
+write cube.x/cube.y as a translate xform op    # NOT write_root_pose_to_sim -- §5.5
+write every attribute (cube.size/hue, light.*, table.*, exposure) via USD/carb Set()
+_aim_camera()                                  # per-capture jitter, before the step
   → scene.write_data_to_sim()
-  → sim.forward()                        # flush USD/Fabric, no time advance
+  → sim.step(render=False)               # republishes the arm's write to Fabric -- a plain
+                                          # sim.forward() left the render frozen (§5.5)
   → assert read_state() ≈ phi            # hard gate
   → camera.update(dt=0.0, force_recompute=True)
-  → N × sim.render()                     # N = accumulation convergence depth
+  → sim.render() ×2, one discarded       # a single render() was flaky across a long
+                                          # session (§5.5); N beyond that is the
+                                          # `totalSpp` carb setting, not a loop count (§7.2)
   → read camera.data.output[...]
 ```
 
-Two unknowns, both Phase-1 spikes (§7.2): whether `sim.forward()` alone suffices with no `sim.step()` at all, and what N must be for the chosen preset to converge to a fixed point.
+Two things this replaced: **`sim.forward()` alone does not suffice** — it updates the read-back tensor buffer but leaves a live camera frozen, discovered only once `IsaacSceneBackend` combined physics writes with an actual `Camera` sensor (§5.5). And **the cube's position never goes through the tensor API at all** — a `RigidObjectCfg`'s pose write there permanently broke that same process's ability to render later material edits on the same prim, so the cube itself was converted to `AssetBaseCfg` (removed from PhysX's simulation) and its position is a plain USD edit, like every other attribute.
 
 ### 4.6 Repository layout
 
@@ -266,7 +272,7 @@ lejepa_identifiability/
 │   ├── sim/                         # backend.py (protocol) ✅ · mock.py ✅
 │   │                                # app.py ✅ · scene.py ✅ · writer.py ✅
 │   │                                # · render.py ✅ — IsaacSceneBackend
-│   │                                # built, not yet run on the pod (§4.3)
+│   │                                # built and run on the pod, green (§4.3)
 │   ├── gates.py                     # §10.1 pipeline-correctness gates ✅ built
 │   ├── gen/                         # generate.py — dataset driver, sharded
 │   └── analysis/                    # LeJEPA training · metrics
@@ -284,7 +290,7 @@ lejepa_identifiability/
 │   ├── test_spike_dynamic_attrs.py  # tier 0 — resolve()/hue/azel/aperture ✅ built
 │   ├── contract/                    # tier 1 — parametrized over backend ✅ built
 │   │                                # mock + isaac (isaac deselected by
-│   │                                # default; not yet run on the pod)
+│   │                                # default locally; green on the pod)
 │   └── isaac/                       # tier 2 — pod only
 ├── scenes/                          # stage_v1_tabletop.usd, materials/
 ├── configs/                         # ρ, λ, n, render preset
@@ -436,8 +442,8 @@ what the §7.5 attribute spike is for.
 | `light.warmth` | Light colour temperature | USD light attribute | Kept on a 1-D warmth axis, for the same reason `cube.hue` is 1-D. |
 | `light.azimuth`, `light.elevation` | Key-light direction — "lighting jitter" | light prim transform | Shadow direction is the most visually salient style cue, and therefore the strongest test of invariance. |
 | `cam.jitter.*` | Per-capture camera pose jitter about the nominal view | `set_world_poses_from_view`, **per capture** | Spike 1 aimed the camera once, at boot. Per-sample re-aiming is a different usage pattern and gets its own check. Radius stays small enough that §5.3's occlusion geometry is not substantially changed. |
-| `table.albedo` | Table material colour | USD material attribute (`PreviewSurface.diffuseColor`, grey) | Continuous, squashes cleanly. **Resolved clean, §7.5** (docs/PLAN.md Phase 3d): bitwise-deterministic and responsive, though the measured effect is far smaller than every other knob's — worth a bigger/more central table patch before trusting it as a strong training signal. |
-| `table.roughness` | Table material roughness | USD material attribute (`PreviewSurface.roughness`) | Continuous. **Blocked, §7.5** (docs/PLAN.md Phase 3d): writable and exactly bitwise-deterministic, but zero measurable pixel effect in this scene — same category as `light.azimuth`/`light.elevation`, carried forward rather than dropped. |
+| `table.albedo` | Table material colour | USD material attribute (`PreviewSurface.diffuseColor`, grey) | Continuous, squashes cleanly. **Resolved clean, §7.5**: bitwise-deterministic and responsive, though the measured effect is far smaller than every other knob's — worth a bigger/more central table patch before trusting it as a strong training signal. |
+| `table.roughness` | Table material roughness | USD material attribute (`PreviewSurface.roughness`) | Continuous. **Blocked, §7.5**: writable and exactly bitwise-deterministic, but zero measurable pixel effect in this scene — same category as `light.azimuth`/`light.elevation`, carried forward rather than dropped. |
 | `exposure` | Post-process exposure | carb / post-process setting, **if one exists** | Locating the lever is itself a spike question. |
 
 > ### ⚠ Categorical style factors do not fit inside *z*
@@ -477,6 +483,8 @@ Mitigations, in order of preference:
 4. **Measure it.** Render a segmentation pass alongside RGB, compute the fraction of cube pixels visible, and log it per sample. Identifiability can then be reported conditioned on visibility — which turns a confound into a finding.
 
 Default configuration: (1) + (2), with (4) always on, because per-sample visibility is cheap to record and enormously clarifying when a number comes out low.
+
+> **Multi-view earned its place empirically, not just theoretically.** Phase 4's single-camera contract suite measured `cube.y`'s render signal at roughly a third of `cube.x`'s (mean abs diff `0.039` vs `0.126` for the same-magnitude move) — a real but weak signal, an artefact of this one camera's oblique angle putting Y-motion closer to its own viewing axis. Worse: under enough simultaneous attribute writes in one long session, that already-weak signal was observed dropping to exactly `0.0`. A stereo/multi-view rig (2–3 cameras with real parallax) should resolve the *magnitude* problem directly — depth-aligned motion for one camera is very likely lateral, and therefore strongly visible, for another. It does not by itself explain the exact-zero drop, which is tracked as its own open item (§11) rather than assumed fixed by adding cameras.
 
 ### 5.4 Isotropy of the transition — and why `style` is allowed to break it
 
@@ -539,13 +547,15 @@ Three options, and the first is recommended:
 - **Rejection sampling.** Discard colliding pairs. *This biases the latent distribution away from Gaussian* and therefore partially undermines Theorem 1's premise. Avoid unless the collision rate is tiny.
 - **One settling step.** Write the state, step physics once, then render. This makes *g* depend on the physics solver and introduces a non-injective many-to-one map (different pre-settle states settle to the same post-settle state). Worst option for identifiability; useful only for physically plausible imagery in a figure.
 
-> **Spike 2 confirmed this, 2026-09-16, for read-back — Phase 4 found rendering needs revisiting.** `write → write_data_to_sim() → sim.forward()`, zero `sim.step()` calls, read back to `0.0` rad joint error and `1.8×10⁻⁷` m cube error (tolerance `1×10⁻⁴`). `one_step_drift` (informational) measured what one step *would* move things by, for reference: `0.044` rad joint drift, `1.4×10⁻⁶` m cube drift.
+> **Spike 2 confirmed this, 2026-09-16, for read-back — the pod run that combined it with a live camera found rendering needed revisiting.** `write → write_data_to_sim() → sim.forward()`, zero `sim.step()` calls, read back to `0.0` rad joint error and `1.8×10⁻⁷` m cube error (tolerance `1×10⁻⁴`). `one_step_drift` (informational) measured what one step *would* move things by, for reference: `0.044` rad joint drift, `1.4×10⁻⁶` m cube drift.
 >
-> **Revised on Phase 4's pod run.** Read-back staying correct with zero `sim.step()` was real, but it measured the wrong thing for this decision: it shows the *tensor buffer* updates, not that the *rendered image* does. Combined with a live `Camera` sensor, `sim.forward()` alone left the render bit-for-bit frozen on every joint/root-state write, confirmed on the pod ([isaac-sim/IsaacLab#6394](https://github.com/isaac-sim/IsaacLab/issues/6394): Fabric-mirrored transforms only get republished by PhysX's own `simulate()`+`fetch_results()` cycle, which only a real `sim.step()` calls — a lighter zero-dynamics alternative, [#7138](https://github.com/isaac-sim/IsaacLab/pull/7138), is open/unmerged). `write_latent_state()` now calls a real `sim.step(render=False)` for the arm, with `set_joint_position_target()` set to the same value so the PD controller has zero error at the step and can't drift the write during it — **measured zero drift** across the states tested (well-separated corner values), not yet swept broadly (interpenetrating/near-limit states, many random samples) — see the Known limit below.
+> **Revised, 2026-09-18.** Read-back staying correct with zero `sim.step()` was real, but it measured the wrong thing for this decision: it shows the *tensor buffer* updates, not that the *rendered image* does. Combined with a live `Camera` sensor, `sim.forward()` alone left the render bit-for-bit frozen on every joint/root-state write, confirmed on the pod ([isaac-sim/IsaacLab#6394](https://github.com/isaac-sim/IsaacLab/issues/6394): Fabric-mirrored transforms only get republished by PhysX's own `simulate()`+`fetch_results()` cycle, which only a real `sim.step()` calls — a lighter zero-dynamics alternative, [#7138](https://github.com/isaac-sim/IsaacLab/pull/7138), is open/unmerged). `write_latent_state()` now calls a real `sim.step(render=False)` for the arm, with `set_joint_position_target()` set to the same value so the PD controller has zero error at the step and can't drift the write during it — **measured zero drift** across the states tested (well-separated corner values), not yet swept broadly (interpenetrating/near-limit states, many random samples) — see §11 (`write_latent_state()`'s zero-drift claim).
 >
 > This reopens, rather than overturns, §5.5's own "one settling step" concern: that option was about letting PhysX *resolve* interpenetration (a genuine many-to-one map). This step is a fixed, zero-integration-in-effect republish — the arm's target already equals its state, so nothing settles — but that equivalence is only measured on the states tested so far, not proven for every reachable state. Treat it as validated for the tested range, not yet for the full latent space.
 >
-> A second, separate finding: the cube (`kinematic_enabled=True`) can't take the same fix. Any tensor-API root-pose write on it — regardless of order relative to `sim.step()` — permanently kills that process's ability to render *later* `cube.hue`/`cube.size` attribute edits on the same prim, for the rest of the session. No official IsaacLab example combines a kinematic pose write with a live material edit in one loop (materials are only ever set once, before `sim.reset()`); this looks like an undocumented interaction, not a documented one worked around. `cube.x`/`cube.y` now write a translate xform op instead — the same mechanism `cube.size`'s scale op already used reliably — sidestepping the tensor API for the cube entirely rather than working around the interaction.
+> **A second, separate finding, needing a deeper fix than the first attempt:** the cube (`kinematic_enabled=True`) couldn't take the arm's fix. Any tensor-API root-pose write on it — regardless of order relative to `sim.step()` — permanently killed that process's ability to render *later* `cube.hue`/`cube.size` attribute edits on the same prim, for the rest of the session. The first attempt (moving `cube.x`/`cube.y` to a translate xform op, same mechanism as `cube.size`'s scale op) fixed `cube.x` but left `cube.y` still occasionally dropping to exactly `0.0` — because the cube was *still* a real PhysX actor, and PhysX's own step loop can autonomously publish a transform into Fabric during the arm's `sim.step()` calls without this project ever calling the tensor write itself; the first time that happens, OmniHydra permanently switches to reading Fabric for that prim and ignores every later USD edit (confirmed via Omniverse's own Fabric docs). The actual fix: the cube's `SceneCfg` entry was converted from `RigidObjectCfg` to `AssetBaseCfg` — removed from PhysX's simulation entirely, matching the table — so there is nothing left for PhysX to ever publish for it. `cube.x`/`cube.y` stayed on the translate-op write path; only the cube's *scene registration* changed.
+>
+> **`cube.y` specifically stayed a real, if weak, residual finding after that fix** — not zero, but roughly a third of `cube.x`'s magnitude and, in one long session, still observed hitting exactly `0.0` under enough simultaneous attribute writes. §5.3 and §11 track this as a scoped, open item, not a closed one — one a multi-view camera rig is expected to help with directly, since it addresses the same root problem (a single view's projection can be non-injective or low-signal for a given latent direction) that motivates multi-view for occlusion in the first place.
 
 ---
 
@@ -633,45 +643,44 @@ crossing prediction at ρ_style = ρ_task² can only be tested by sweeping it.
 
 ### 6.3 State writer
 
-Sketch, structured to match §4.5. Two points of care: root poses are in **world** frame so the environment origin must be added, and the root pose is a 7-vector whose orientation is a **normalised (w, x, y, z) quaternion** — not something to leave uninitialised while writing only x and y.
+Real implementation, `src/idtb/sim/writer.py`, not a sketch — built, run on the pod, and revised once after the composition surfaced two defects no isolated spike could (§4.5, §5.5).
 
 **The writer dispatches by write path, not by group.** §5.2's three groups are a
-*sampling and reporting* split; what the writer cares about is that `arm.*` and
-`gripper.*` go through `write_joint_state_to_sim`, `cube.x`/`cube.y` through the
-root-state write, and `cube.size`, `cube.hue` and every `light.*`, `table.*`,
-`cam.*` through USD attribute writes that **Spikes 1–2 verified nothing about**
-(§7.2's scope note). Those three paths have different failure modes and each needs
-its own read-back, so the dispatch stays explicit rather than one indexed
-assignment over `phi_vals`.
+*sampling and reporting* split; the writer cares about *how* a value reaches the
+renderer, and that split is now: `arm.*`/`gripper.*` through
+`write_joint_state_to_sim` (a real `sim.step()` republishes it, §4.5); `cube.x`/
+`cube.y` through a **USD translate xform op**, not `write_root_pose_to_sim` — a
+root-state write there breaks the cube's own material rendering, so the cube is
+`AssetBaseCfg`, off the tensor API entirely (§5.5); and `cube.size`, `cube.hue`,
+every `light.*`/`table.*`/`cam.*`, and `exposure` through USD/carb attribute
+writes. Three paths, three different failure modes, three different read-backs —
+never one indexed assignment over `phi_vals`.
 
 ```python
-# src/idtb/sim/writer.py  (sketch -- imports Isaac lazily, inside the function)
-def write_latent_state(scene, bound_spec, phi_vals):
-    """Teleport the scene to the physical state encoded by phi_vals.
-    phi_vals: [B, n] already squashed. No physics stepping."""
-    robot = scene["robot"]
-    cube  = scene["cube"]
+# src/idtb/sim/writer.py  (actual dispatch, condensed -- imports Isaac lazily)
+def write_latent_state(rig, spec, phi):
+    """Teleport to squashed physical state phi, shape [1, n]."""
+    joint_pos = rig.robot.data.default_joint_pos.clone()
+    cube_x, cube_y = rig.default_cube_xy
 
-    # --- path 1: arm joints (indices resolved at bind time from names) -
-    joint_pos = robot.data.default_joint_pos.clone()
-    joint_pos[:, bound_spec.joint_cols] = phi_vals[:, bound_spec.joint_dims]
-    robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos))
+    for i, handle in enumerate(spec.handles):
+        role, value = handle.role, float(phi[0, i].item())
+        if role in ARM_ROLES: joint_pos[:, rig.arm_joint_ids[...]] = value
+        elif role == "gripper.aperture": ...                    # joint path
+        elif role == "cube.x": cube_x = value
+        elif role == "cube.y": cube_y = value                   # staged, not written yet
+        elif role == "cube.size": write_cube_scale(rig, value)  # USD scale op
+        elif role == "cube.hue": write_hue(rig.cube_shader, value)
+        # ... light.*, table.*, exposure -- each its own USD/carb Set() call
 
-    # --- path 2: cube root pose, world frame, normalised wxyz quaternion
-    root = cube.data.default_root_state.clone()          # [B, 13]
-    root[:, bound_spec.cube_cols] = phi_vals[:, bound_spec.cube_dims]
-    root[:, 2] = table_h + 0.5 * edge_len(phi_vals)      # derived, not a latent -- §5.2.1
-    root[:, 0:3] += scene.env_origins                    # local -> world
-    cube.write_root_pose_to_sim(root[:, :7])             # quat already set
-    cube.write_root_velocity_to_sim(torch.zeros_like(root[:, 7:]))
+    write_cube_position(rig, cube_x, cube_y, edge_m)     # USD translate op, NOT
+                                                          # write_root_pose_to_sim (§5.5)
+    rig.robot.set_joint_position_target(joint_pos)       # zero PD error at the step
+    rig.robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos))
 
-    # --- path 3: attributes -- size, colour, lights, camera, materials -
-    # UNVERIFIED as of Spike 1/2. See §7.5 before treating any of these as
-    # a first-class latent; read-back is per-attribute, not one assertion.
-    write_attributes(scene, bound_spec, phi_vals)
-
-    # --- flush; do NOT call scene.reset(), which restores defaults -----
-    scene.write_data_to_sim()
+    rig.scene.write_data_to_sim()
+    rig.sim.step(render=False)   # republishes the arm's write to Fabric (§4.5) --
+                                  # sim.forward() alone leaves a live camera frozen
 ```
 
 
@@ -679,7 +688,7 @@ def write_latent_state(scene, bound_spec, phi_vals):
 >
 > `write_root_pose_to_sim` was reported leaving objects frozen at the environment origin on Isaac Sim 5.0 despite working on 4.5 ([IsaacSim #251](https://github.com/isaac-sim/IsaacSim/issues/251)). That issue is closed, but **not because it was fixed**: NVIDIA judged the behaviour to originate in the Isaac Lab asset layer rather than Isaac Sim core and sent it there. It was reassigned, not resolved — and we are moving to a *different* Isaac Lab major version than it was filed against. A failure of this kind is silent: the dataset generates normally and the cube latents are simply noise. **The read-back assertion in §4.5 is therefore not optional and not a debug aid — it is a correctness gate that runs on every sample during development and on a sampled basis in production runs.**
 >
-> Assets configured with `fix_root_link` or `kinematic_enabled` can also silently ignore root-pose writes. Same gate catches it.
+> Assets configured with `fix_root_link` or `kinematic_enabled` can also silently ignore root-pose writes. Same gate catches it. **What this project actually hit was subtler and the read-back gate did not catch it** (§5.5): the cube's `kinematic_enabled=True` root-pose write registered correctly in the tensor buffer, passed read-back, and *still* permanently broke rendering — not of itself, but of later material edits on the same prim, once combined with a real `sim.step()`. A gate on the value written is not a gate on what the render shows; §4.5's capture sequence exists because those two can diverge silently.
 >
 > For the record, `write_joint_state_to_sim` is **not** deprecated as of `main`; it takes `joint_ids`/`env_ids` directly. Deprecations elsewhere in the asset API (`set_external_force_and_torque`, `write_joint_friction_to_sim`) do not affect this project.
 
@@ -762,7 +771,7 @@ If this fails, nothing else in the project is worth running. The same test runs 
 
 > **Scope: these four cover *physics-state writes only*.** Everything measured below moves through `write_joint_state_to_sim` or `write_root_state_to_sim` — joint angles and rigid-body pose, i.e. §5.2's `base` group. The `full` and `style` groups write through geometry, material, light, camera and post-process APIs that none of this touched. §7.5 is the spike that closes that gap; nothing here transfers to it by default.
 
-These four questions gated the render design and none of them were answerable from documentation; all four needed the GPU pod, and all four were run to a verdict on 2026-09-16 (four iterations — docs/PLAN.md Phase 3 has the blow-by-blow, including two defects the spike script itself had, found and fixed against the real API rather than assumed away).
+These four questions gated the render design and none of them were answerable from documentation; all four needed the GPU pod, and all four were run to a verdict on 2026-09-16 (four iterations, including two defects the spike script itself had, found and fixed against the real API rather than assumed away).
 
 | # | Question | Answer |
 |---|---|---|
@@ -817,7 +826,7 @@ jittered ad hoc inside the scene setup.
 
 ### 7.5 Spike 5 — the attribute write paths (`full` and `style`): resolved, two latents still open
 
-`spikes/spike_dynamic_attrs.py` (docs/PLAN.md Phase 3b/3c) ran Spikes 1–4's
+`spikes/spike_dynamic_attrs.py` ran Spikes 1–4's
 three-question recipe (does the write land, does it move pixels, is it still
 bitwise deterministic under `standard`) against every `full`/`style` write path:
 a geometry write for `cube.size`, a USD material write for `cube.hue`, light
@@ -832,7 +841,7 @@ tried and cleanly falsified.
 **Resolved: `standard` now includes `/rtx/resetPtAccumOnAnimTimeChange=True`.**
 An external research pass (`docs/answer.md`, then a follow-up round —
 `docs/research_task_light_direction_dead_knob.md`) and a systematic sweep of
-docs/PLAN.md Phase 3c's experiments (A–I, detailed there) converged on this
+experiments (A–I) converged on this
 single extra carb key. With it, `cube.hue`, `light.intensity`, `light.warmth`,
 and `cam.jitter` are all bitwise-deterministic **and** correctly responsive,
 `cube.size` stays clean, and nothing about `base`, render mode, or fidelity
@@ -879,9 +888,9 @@ would remove the single most salient style-invariance test the project has
 to a light type scene v1 doesn't even use. Instead: **`light.azimuth_elevation`
 stays an open, scoped item** — blocked on this spike scene's `DistantLight`,
 explicitly re-tested against scene v1's actual light rig before either
-including or excluding it as a `style` latent (docs/PLAN.md Phase 3c has the
-checklist item). The three-question recipe (`run_knob_check`) that found this
-is written once, reusably, for exactly this reason.
+including or excluding it as a `style` latent (§12 has the checklist item).
+The three-question recipe (`run_knob_check`) that found this is written once,
+reusably, for exactly this reason.
 
 **Two infrastructure bugs found and fixed along the way, independent of the
 render question:**
@@ -900,7 +909,7 @@ over time and this pipeline has none by design (§5.5) — a completed check,
 same category as Spike 1's aliasing FAIL.
 
 **`table.roughness`/`table.albedo` — resolved, one clean and one a second
-dead knob (docs/PLAN.md Phase 3d).** Every other knob above got a Round-1 or
+dead knob.** Every other knob above got a Round-1 or
 Round-2 verdict; these two didn't, because no run of this spike ever built a
 table prim at all — §5.2.3 named them but nothing ever tested them.
 `build_rig()` now spawns one, offset beside the cube and raised 2mm above the
@@ -1141,7 +1150,7 @@ Treat the GPU as a batch renderer, not a development environment. Per §1 this i
 | **1** | Infrastructure + spikes | Vendor `isaac-lab` image pulled at the resolved tag; network volume mounted at `/idtb` with caches relocated onto it; `infra/bootstrap.sh` handling the image's uid-1000 user against a root-owned volume; repeatable pod launch. **Spikes 1–4 (§7.2) answered and recorded in §3.** | 2–3 days |
 | **2** | Scene v1 | `stage_v1_tabletop.usd`: table, Franka, cube, PBR materials, HDRI + area lights, camera rig (2–3 views). Debug-preset renders look right. | 1–2 days |
 | **2b** | Spike 5 — attribute writes | `spikes/spike_dynamic_attrs.py` (§7.5): does each `full`/`style` knob write, read back, move pixels, and stay bitwise deterministic under `standard`? Measured ranges for every new handle. Gates the group design before any of it reaches `SceneBackend`. | 1 day |
-| **3** | Backend seam + real backend | `SceneBackend` protocol and `MockSceneBackend`, designed against the spike's measurements rather than against documentation; then `IsaacSceneBackend`: handle resolution by name, state writer, read-back assertions confirming every write landed. Collision and visibility diagnostics. Tier-1 contract suite green against Isaac. | 2 days |
+| **3** | Backend seam + real backend | `SceneBackend` protocol and `MockSceneBackend`, designed against the spike's measurements rather than against documentation; then `IsaacSceneBackend`: handle resolution by name, state writer, read-back assertions confirming every write landed. Collision and visibility diagnostics. Tier-1 contract suite green against Isaac. **Done, 2026-09-18** — `pytest -m isaac`: 30 passed, 2 skipped, 0 failed, against the spike scene (§7.5's scope note: re-verify once scene v1's own materials/lights/cameras replace it). | 2 days |
 | **4** | Determinism gate | Deterministic capture path; the §7.1 acceptance test passing for every preset intended for dataset use, called by `generate.py` itself and not only by the test suite. | 1–2 days |
 | **5** | OU generator | Sharded writer storing (x, x′, z, z′, visibility, collision, ρ, seed, intrinsics); per-shard checkpointing. | 2 days |
 | **6** | First dataset | ~100k pairs at `standard`, ρ_task = 0.95 (a starting point, not a finding), **`base` group only, no style variation** — the clean control every later configuration is compared against. Visual audit of a random sample grid. | 0.5–1 day compute |
@@ -1156,7 +1165,7 @@ Note that Phase 0b has no dependency on Phase 0 — the pure layers can be built
 
 One deliberate re-ordering against an earlier draft: **the `SceneBackend` protocol and the mock are built in Phase 3, after the spike, not in Phase 0b.** Every Isaac signature in §4.4 came from reading documentation, never from running anything. The risk was never the method *names* — it is granularity and semantics, which only the spike settles. Designing the central abstraction against guesses and then discovering the guesses were wrong is the expensive order.
 
-`docs/PLAN.md` carries the ordered task list for the current milestone, including who runs what; this table stays the plan of record.
+`docs/PLAN.md` carries the ordered task list for the current milestone — **Phase 2 onward** as of 2026-09-18, Phases 0–3 having closed — including who runs what; this table stays the plan of record.
 
 ---
 
@@ -1165,8 +1174,8 @@ One deliberate re-ordering against an earlier draft: **the `SceneBackend` protoc
 ### 10.1 Pipeline-correctness gates
 
 Each must pass before the next phase is trusted. **`determinism_gate`, `read_back_gate`
-and `style_sensitivity_gate` are library code, `src/idtb/gates.py`** (docs/PLAN.md
-Phase 4) — the tests below and `generate.py`, once it exists, call the same
+and `style_sensitivity_gate` are library code, `src/idtb/gates.py`** — the tests
+below and `generate.py`, once it exists, call the same
 functions, so a gate cannot be skipped just because nobody ran `pytest`.
 
 - **Sampler:** Cov(z) ≈ I, Cov(z, z′) ≈ ρI, per-dim normality tests pass. (`tests/test_ou.py`.)
@@ -1174,7 +1183,7 @@ functions, so a gate cannot be skipped just because nobody ran `pytest`.
 - **Renderer:** order-independence test of §7.1 passes. `gates.determinism_gate` — also catches an aliased sensor buffer (§7.2), since that is otherwise indistinguishable from a genuinely reproducible render.
 - **Injectivity proxy:** nearest-neighbour check — the fraction of image pairs whose pixel distance is near zero while their latent distance is large should be negligible. A non-trivial fraction means *g* is not injective and there is an occlusion or symmetry problem to fix *before* blaming the encoder. A lightweight two-state version of this runs in `tests/contract/`; the full nearest-neighbour statistic over many samples is a Phase 5+ analysis-layer measurement.
 - **Style sensitivity:** varying a `style` dimension alone must move pixels far above the render noise floor, per knob (§7.5). A style knob that is silently disconnected hands the encoder perfect invariance for free, and the headline invariance result is then an artefact of an unchecked write. This gate is why §7.5 ranks sensitivity above determinism. `gates.style_sensitivity_gate`.
-- **Group wiring:** `Cov(z, z′)` measured on real generated shards must be ρ_task on the task block and **exactly zero** on the style block. Cheap, and the only direct evidence that ρ = 0 reached the dimensions it was meant to. Covered at the sampler level by Phase 3a's tier-0 test; re-run on real generated shards once `generate.py` exists.
+- **Group wiring:** `Cov(z, z′)` measured on real generated shards must be ρ_task on the task block and **exactly zero** on the style block. Cheap, and the only direct evidence that ρ = 0 reached the dimensions it was meant to. Covered at the sampler level by a tier-0 test already; re-run on real generated shards once `generate.py` exists.
 - **Trivial-baseline check:** a linear probe from raw pixels to *z* should score poorly (confirming the mixing is genuinely nonlinear, analogous to the paper's *R²*(x→z) ≈ 0.73–0.78 column). If raw pixels already predict *z* linearly, the task is too easy to be informative. Analysis-layer, Phase 5+.
 
 Negative controls for the three gates above (fault-injecting `MockSceneBackend`
@@ -1202,7 +1211,7 @@ Tests accompany every module. The tiering exists because of the platform constra
 | Tier | Runs on | Contents |
 |---|---|---|
 | **0 — pure** | laptop, plain `pytest` | OU sampler statistics, squash monotonicity and injectivity, `LatentSpec` handle bookkeeping, `MockSceneBackend` contract (`test_mock.py`), gates + negative controls (`test_gates.py`), shard writer round-trip, metrics against synthetic ground truth |
-| **1 — contract** | laptop (mock) **and** pod (Isaac), one suite parametrized over backend | **Built, `tests/contract/`, Phase 4.** Write → read-back fidelity; render determinism and order-independence (§7.1); output shapes and dtypes; injectivity proxy; diagnostics present and in range; style sensitivity — each parametrized over `base`/`base+style`/`full`/`full+style` too. Both `MockSceneBackend` and `IsaacSceneBackend` are registered; the Isaac branch is behind `@pytest.mark.isaac` and has not run on the pod yet (§4.3, §3.1) — that pod session is the one remaining Phase 4 item. |
+| **1 — contract** | laptop (mock) **and** pod (Isaac), one suite parametrized over backend | **Built, `tests/contract/`, green on both backends.** Write → read-back fidelity; render determinism and order-independence (§7.1); output shapes and dtypes; injectivity proxy; base- and style-sensitivity per dimension; diagnostics present and in range — each parametrized over `base`/`base+style`/`full`/`full+style` too. Both `MockSceneBackend` and `IsaacSceneBackend` are registered; the Isaac branch is behind `@pytest.mark.isaac`, deselected locally, green on the pod (§4.3, §3.1) — 30 passed, 2 skipped, 0 failed, with `cube.y`'s weak per-view signal tracked as an open item (§11), not a failure. |
 | **2 — Isaac only** | pod, under Isaac's interpreter | asset loading, joint-name resolution against the real Franka, annotator availability, convergence-to-fixed-point of the chosen preset |
 
 Mechanics:
@@ -1224,15 +1233,16 @@ Mechanics:
 | Provisioned a GPU without RT cores | Critical | Hard rule: RT-core GPUs only; `infra/preflight.sh` hard-fails one. **Closed for the current pod** — RTX 4090, CC 8.9 (§8.1). Re-opens on any re-provisioning. |
 | No local runtime → slow, blind iteration on Isaac code | High | `MockSceneBackend` and the tier-0/tier-1 split (§4.3, §10.3); Phase 0b runs in parallel with Phase 0. |
 | Occlusion makes g non-injective; results look like encoder failure | High | Multi-view cameras, high oblique placement, per-sample visibility logging, injectivity proxy check. |
+| A latent's render signal is real but weak from a given single camera, and can drop to exactly zero under enough compounding writes | Medium, open | **New, found on the pod, 2026-09-18.** `cube.y`'s signal measured at roughly a third of `cube.x`'s magnitude for the same-size move (this camera's oblique angle puts Y-motion closer to its own viewing axis) and was observed hitting bit-exact `0.0` in one long test session under enough simultaneous attribute writes — a genuine per-view weak-signal robustness gap, not the render-freezing bug §5.5 already fixed (both `cube.x`, `cube.y`, and every other base dim register real signal in isolation). Expected to improve directly once the multi-view rig (§5.3, §9 Phase 2) gives a second, differently-angled camera to fall back on; the exact-zero mechanism itself is not yet root-caused and should not be assumed fixed by adding cameras alone. Test coverage: `tests/contract/test_backend_contract.py::test_base_knobs_are_all_sensitive`, added specifically because the pre-existing tests could (and did) pass on the `full`/`style` dims' signal alone while `base` dims stayed silently disconnected underneath. |
 | Cube rotational symmetry hides a latent dimension | High | Omit yaw from `base`; switch to a visually asymmetric object before introducing orientation latents (§5.2.1). |
 | A `style` knob is silently disconnected, so invariance is measured for free | High | **New with the group design.** A write that lands but changes no pixels is indistinguishable from a perfectly invariant encoder in every downstream metric. Mitigated by §7.5's per-knob sensitivity check, ranked above determinism, and by §10.1's style-sensitivity gate running on generated data, not only in the spike. |
-| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | **Resolved for `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter`/`table.albedo`; Medium, open, scoped for `light.azimuth_elevation` and `table.roughness`** | **Fixed.** Adding `/rtx/resetPtAccumOnAnimTimeChange=True` to `standard` (§7.5) made every attribute except light rotation and table roughness bitwise-deterministic and correctly responsive, with no mode change and no cost to `base`. `light.azimuth_elevation` remains blocked after seven falsified render-config hypotheses and a confirmed, fixed write bug (Euler-decomposition axis order) — evidence points to this specific `DistantLight`'s orientation not being consumed by the shading path at all, independent of any carb setting. `table.roughness` (Phase 3d) joined it later: exact write, exact bitwise determinism, but zero measurable pixel effect — likely no visible specular highlight on the table from this camera angle in this scene. Neither is dropped: scene v1 replaces this light type and this material entirely (§7.4), so both are carried forward as explicit re-test items against the real rig, not closed questions. |
+| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | **Resolved for `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter`/`table.albedo`; Medium, open, scoped for `light.azimuth_elevation` and `table.roughness`** | **Fixed.** Adding `/rtx/resetPtAccumOnAnimTimeChange=True` to `standard` (§7.5) made every attribute except light rotation and table roughness bitwise-deterministic and correctly responsive, with no mode change and no cost to `base`. `light.azimuth_elevation` remains blocked after seven falsified render-config hypotheses and a confirmed, fixed write bug (Euler-decomposition axis order) — evidence points to this specific `DistantLight`'s orientation not being consumed by the shading path at all, independent of any carb setting. `table.roughness` joined it later: exact write, exact bitwise determinism, but zero measurable pixel effect — likely no visible specular highlight on the table from this camera angle in this scene. Neither is dropped: scene v1 replaces this light type and this material entirely (§7.4), so both are carried forward as explicit re-test items against the real rig, not closed questions. |
 | ρ_style = 0 breaks App. F's isotropy condition | Medium | §5.4.1 argues the break is in the benign direction — an infinitely fast dimension leaves the top of the spectrum rather than interleaving into it — but that is *our* reading, not the paper's. Treated as a falsifiable prediction: `R²(h → z_style) ≈ 0` is measured in every run, and the ρ_style sweep (§9 Phase 8) tests the predicted crossing at ρ_task². If style latents prove linearly decodable, the group split is wrong and gets rethought, not patched. |
 | `cube.size` confounds with camera distance under a single view | Medium | A larger cube further away renders near-identically to a smaller one nearer — non-injectivity of the same kind as §5.3's occlusion, introduced by the `full` group. Mitigated by the 2–3 cameras §5.3 already prescribes, and by keeping the size radius small relative to the depth range; the injectivity proxy in §10.1 is what would catch it. |
 | Bounded joints break Gaussianity of z | High | Absorbed tanh squash (§5.1). Never clip, never wrap. |
 | Driver / Isaac Sim release mismatch | Medium | Resolved to Isaac Sim 6.0.1, on a host below its tested driver, accepted knowingly (§3.4.1) rather than re-provisioned for — two prior attempts to select hosts by driver both failed to land the target branch. Residual: the gap is real (570.195.03 vs. tested 595.58.03) and `preflight.sh` fails on it by default rather than hiding it; the actual check is the §7.2 spike measuring the renderer directly, not the driver number as a proxy for it. |
 | Isaac Lab 3.0 beta introduces breaking changes before 3.0 stable | Medium | Accepted knowingly (§3.4). Exposure is bounded by a deliberately small Isaac Lab surface behind the §4.3 seam, with the tier-1 contract suite defining what a migration has to keep working. Pin the tag; do not track `develop`. |
-| Rendering throughput makes large datasets infeasible | Medium | Spikes 1, 3, 4 done (§7.2); `standard` measured deterministic and converges in one render call. Measured `~0.44` GPU-hours per 100k pairs at B=2, 128×128, on the spike scene (Franka + cuboid + dome light) — **not scene v1**, and not yet swept across `--num-envs {1,2,8,32}` (§9 Phase 3 note). Re-measure before trusting it for a budget. |
+| Rendering throughput makes large datasets infeasible | Medium | Spikes 1, 3, 4 done (§7.2); `standard` measured deterministic and converges in one render call. Measured `~0.44` GPU-hours per 100k pairs at B=2, 128×128, on the spike scene (Franka + cuboid + dome light) — **not scene v1**, not yet swept across `--num-envs {1,2,8,32}`, and now costs a second render call per capture (§5.5's settle-render fix). Re-measure before trusting it for a budget. |
 | Physics step turns out to be required before rendering | Medium | **Reopened, then closed differently than expected.** Spike 2 (§7.2) measured zero-`sim.step()` *read-back* correct to solver tolerance, but Phase 4's pod run found the *render* stays frozen without a real step — read-back and render silently diverged. Fixed with a real `sim.step(render=False)` for the arm (zero measured drift, §5.5) and by moving the cube's position off the tensor API entirely (a pure-USD translate op instead, since a tensor-API pose write on the cube separately breaks rendering its material). |
 | Ephemeral pods re-download assets every session | Medium | Persistent network volume; `infra/bootstrap.sh` relocates the vendor's own cache list onto it by symlink (§8.3). Only a pod restart proves it took — a cache that is not persisting is indistinguishable from a slow first run. |
 | Network volume mounted at `/workspace` shadows the image's Isaac Lab install | Medium | Mount at `/idtb`; both pod scripts refuse `/workspace` and `tests/test_infra_scripts.py` pins the refusal. The symptom is a missing `isaaclab.sh`, which reads as a broken image rather than a mount problem. |
@@ -1255,19 +1265,20 @@ Two tracks, and they are independent.
 6. ~~Restart the pod once and confirm Isaac does not re-download assets.~~ **Done, properly — the pod was deleted and recreated, not just restarted.** A same-container restart wouldn't prove anything: the container's own ephemeral layer survives a restart regardless of whether relocation worked. The delete+recreate landed on a genuinely new container, and `bootstrap.sh` correctly re-created the `$HOME` symlinks from scratch (not `already linked` — that phrasing only applies to a same-container restart) pointing at the same `/idtb/cache/*` content as before. `preflight.sh` and `bootstrap.sh` both re-ran clean on the new pod, confirming both are safe to re-run on a fresh container, not just idempotent within one.
 7. ~~Run a shipped Isaac Lab tutorial headless, before running any of our code.~~ **Done — `create_empty.py --headless` completed (`[INFO]: Setup complete...`) on driver 580.159.04**, the first direct evidence against a driver-mismatch crash (§3.4.1's residual risk). **No PNG was produced** — this tutorial is scene composition, not rendering; the "look at the PNG" framing assumed the wrong tutorial. A real visual/rendering check is folded into Spike 1 (§7.2, "Render non-degenerate") rather than repeated here. One non-fatal oddity worth watching: Kit's `OmniHub` helper failed to launch and retried ~44 times (~14s) before giving up gracefully — harmless for this asset-free tutorial, but worth attention once a script streams a real Omniverse asset (the Franka, in the spike).
 8. ~~Run Spikes 1–4 (§7.2).~~ **Done.**
-8b. ~~Spike 5 round 2 (§7.5, docs/PLAN.md Phase 3c).~~ **Done, resolved except one item.** `resetPtAccumOnAnimTimeChange=True` added to `standard` fixed `cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter`. `light.azimuth_elevation` is blocked on this spike scene's `DistantLight` specifically (§7.5) — carried forward as an explicit re-test against scene v1's light rig, not dropped.
-9. Only then start on `stage_v1_tabletop.usd` — and when it exists, re-run `light.azimuth_elevation`'s and `table.roughness`'s knob checks (or their scene-v1 equivalents) against the real rig before deciding whether either is a usable `style` latent (§7.5).
+8b. ~~Spike 5 round 2 (§7.5).~~ **Done, resolved except one item.** `resetPtAccumOnAnimTimeChange=True` added to `standard` fixed `cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter`. `light.azimuth_elevation` is blocked on this spike scene's `DistantLight` specifically (§7.5) — carried forward as an explicit re-test against scene v1's light rig, not dropped.
+9. **Current pointer.** Start on `stage_v1_tabletop.usd` (§9 Phase 2) — table, Franka, cube, PBR materials, HDRI + area lights, and a **2–3 view camera rig** (§5.3's multi-view mitigation, now also motivated empirically by the `cube.y` weak-signal finding, §11). Once it exists: (a) re-run `light.azimuth_elevation`'s and `table.roughness`'s knob checks against the real light rig and material (§7.5); (b) re-run `IsaacSceneBackend`'s tier-1 contract suite against it, since §7.4 already predicts the backend needs rewriting for the new light/material types; (c) re-check whether `cube.y`'s weak signal persists once a second camera is available; (d) sweep the `sim.step()` zero-drift claim broadly (§5.5) rather than only on the states the contract suite happens to write. `docs/PLAN.md` carries the ordered checklist for this.
 
 **Track B — build what needs no decisions (local, start now):**
 
-0. ~~**Group support in the pure layer** — `Handle.group`, `LatentSpec.dims/subset/rho_vector/group_of_dim` with the base→full→style ordering contract, and a vector-ρ `sample_ou_pairs`.~~ **Done, 2026-09-17** (docs/PLAN.md Phase 3a). None of it depended on a measurement: the *structure* was decided (§5.2), only the radii and the membership of individual knobs still wait on Spike 5. Tier-0 tests: cumulative group membership, `dims("base")` is a prefix of `dims("full")`, ordering violations rejected, block cross-covariance with zero on the style block.
+0. ~~**Group support in the pure layer** — `Handle.group`, `LatentSpec.dims/subset/rho_vector/group_of_dim` with the base→full→style ordering contract, and a vector-ρ `sample_ou_pairs`.~~ **Done, 2026-09-17.** None of it depended on a measurement: the *structure* was decided (§5.2), only the radii and the membership of individual knobs still wait on Spike 5. Tier-0 tests: cumulative group membership, `dims("base")` is a prefix of `dims("full")`, ordering violations rejected, block cross-covariance with zero on the style block.
 
 1. ~~OU sampler, `LatentSpec`, squash — with tier-0 tests.~~ **Done.** Plus the package scaffolding, the §4.2 import guard as an executable test, and the two pod scripts Track A needs.
 2. ~~`spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast.~~ **Written, run four times, answered (§7.2).**
-3. ~~`spikes/spike_dynamic_attrs.py` — Spike 5, the `full`/`style` attribute write paths.~~ **Done** (docs/PLAN.md Phase 3b/3c). Reuses `spike_api.py`'s pure layer rather than duplicating it; its own new pure helpers (`try_candidates`, `hue_to_rgb`, `azel_to_direction`, `cube_size_radius_from_aperture`) are covered by `tests/test_spike_dynamic_attrs.py`. Resolved everything except `light.azimuth_elevation` (§7.5).
-3b. ~~`table.roughness`/`table.albedo` — the one knob pair Spike 5 never actually tested, found while scoping Phase 4's Isaac backend.~~ **Done, 2026-09-18** (docs/PLAN.md Phase 3d). Added a table prim to `spikes/spike_dynamic_attrs.py`; `table.albedo` resolved clean (joins the supported set), `table.roughness` resolved as a second dead knob next to `light.azimuth_elevation` — zero measurable pixel effect, not a write-path bug.
-4. ~~Then, against what both spikes measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.~~ **Done, 2026-09-18** (docs/PLAN.md Phase 4). `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`, `src/idtb/gates.py`, `tests/test_mock.py`, `tests/test_gates.py` (negative controls), `tests/contract/` (parametrized over group config and, now, over backend).
-5. ~~`IsaacSceneBackend` — blocked on Phase 3d's table verdict, built the same day it landed.~~ **Done, 2026-09-18** (docs/PLAN.md Phase 4). `src/idtb/sim/{app,render,writer,scene}.py`, registered behind `@pytest.mark.isaac` in `tests/contract/`. Written blind like every other Isaac-facing file here — every individual call verified in isolation by one spike or the other, but the composition (Franka + every attribute write, together, in one scene) has never run. **Remaining: the pod session that runs it (§3.1).**
+3. ~~`spikes/spike_dynamic_attrs.py` — Spike 5, the `full`/`style` attribute write paths.~~ **Done.** Reuses `spike_api.py`'s pure layer rather than duplicating it; its own new pure helpers (`try_candidates`, `hue_to_rgb`, `azel_to_direction`, `cube_size_radius_from_aperture`) are covered by `tests/test_spike_dynamic_attrs.py`. Resolved everything except `light.azimuth_elevation` (§7.5).
+3b. ~~`table.roughness`/`table.albedo` — the one knob pair Spike 5 never actually tested, found while scoping the Isaac backend.~~ **Done, 2026-09-18.** Added a table prim to `spikes/spike_dynamic_attrs.py`; `table.albedo` resolved clean (joins the supported set), `table.roughness` resolved as a second dead knob next to `light.azimuth_elevation` — zero measurable pixel effect, not a write-path bug.
+4. ~~Then, against what both spikes measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.~~ **Done, 2026-09-18.** `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`, `src/idtb/gates.py`, `tests/test_mock.py`, `tests/test_gates.py` (negative controls), `tests/contract/` (parametrized over group config and, now, over backend).
+5. ~~`IsaacSceneBackend` — blocked on the table verdict (item 3b), built the same day it landed.~~ **Built and run, 2026-09-18.** `src/idtb/sim/{app,render,writer,scene}.py`, registered behind `@pytest.mark.isaac` in `tests/contract/`. Combining a Franka arm with every attribute write in one scene — never exercised by any isolated spike — found real defects: a `FabricFrameView` prim-path gap, a `SimulationApp` teardown crash, and, the deepest one, physics writes never reaching a live camera without a real `sim.step()`, plus a kinematic cube's tensor-API pose write separately breaking its own material rendering. All fixed (§4.5, §5.5).
+6. ~~The pod session that runs the full tier-1 contract suite against Isaac.~~ **Done, 2026-09-18.** `pytest -m isaac`: 30 passed, 2 skipped, 0 failed — including `test_base_knobs_are_all_sensitive`, added specifically because the pre-existing tests could (and did) pass on a mixed group's `full`/`style` signal alone while `base` dims stayed silently disconnected underneath. One open, scoped item carried forward rather than blocking: `cube.y`'s weak per-view signal (§11), expected to improve once scene v1's multi-view rig (item 9, Track A) lands.
 
 > ### Closing note on sequencing
 >
