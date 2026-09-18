@@ -43,6 +43,14 @@ backend = IsaacSceneBackend()
 backend.bind(spec)
 print("PLAYING", backend._rig.sim.is_playing(), flush=True)
 
+import carb.settings  # noqa: E402
+
+_settings = carb.settings.get_settings()
+print("updateToUsd_before", _settings.get("/physics/updateToUsd"), flush=True)
+_settings.set_bool("/physics/updateToUsd", True)
+_settings.set_bool("/physics/updateVelocitiesToUsd", True)
+print("updateToUsd_after", _settings.get("/physics/updateToUsd"), flush=True)
+
 n = spec.n
 base_z = torch.zeros(1, n)
 arm_z = base_z.clone()
