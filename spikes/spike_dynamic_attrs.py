@@ -4,10 +4,17 @@ Spikes 1-4 (``spikes/spike_api.py``) measured exactly two write paths --
 ``write_joint_state_to_sim`` and ``write_root_state_to_sim`` -- which is §5.2's
 `base` group and nothing else. Every `full`/`style` latent moves through a
 *different* mechanism: a geometry write for ``cube.size``, a USD material write
-for ``cube.hue``, a light-attribute write for ``light.*``, a per-capture camera
-re-aim for ``cam.jitter.*``, a post-process setting for ``exposure``. None of
-those has been touched, and none of Spike 1's verdicts transfers to them by
-default (docs/PLAN.md Phase 3b).
+for ``cube.hue`` and ``table.roughness``/``table.albedo``, a light-attribute
+write for ``light.*``, a per-capture camera re-aim for ``cam.jitter.*``, a
+post-process setting for ``exposure``. None of those has been touched, and
+none of Spike 1's verdicts transfers to them by default (docs/PLAN.md Phase 3b).
+
+**``table.roughness``/``table.albedo`` were added later than everything else
+in this file** (docs/PLAN.md Phase 4 follow-up) -- every prior round tested
+the cube, a light and the camera, but no round ever built a table prim at
+all, so README §5.2.3's two table knobs sat undeclared rather than merely
+unresolved. ``build_rig()`` now spawns one; the two checks follow the same
+three-question recipe as everything else via :func:`run_knob_check`.
 
 Run it on the pod, not here::
 
@@ -250,6 +257,7 @@ def dump_render_product_rtx_attributes(prim: Any) -> dict[str, Any]:
 GROUND_PATH = "/World/Ground"
 LIGHT_PATH = "/World/Light"
 CUBE_PATH = "/World/Cube"
+TABLE_PATH = "/World/Table"
 CAMERA_PATH = "/World/Camera"
 
 CUBE_TRANSLATION_XY = (0.45, 0.0)  # z is derived from the base edge, in build_rig()
@@ -278,6 +286,26 @@ LIGHT_DIRECTION_READBACK_ATOL = 1e-3  # unit-vector components
 
 BASE_CAMERA_JITTER = (0.0, 0.0)
 PERTURBED_CAMERA_JITTER = (0.05, -0.04)
+
+# README §5.2.3: never spiked at all before this addition (docs/PLAN.md Phase
+# 4 follow-up) -- no prior run of this file built a table prim. Positioned
+# beside the cube, not under it, and raised 2mm above the ground plane so it
+# renders in front of the ground in that footprint rather than being hidden
+# under it -- see build_rig()'s docstring.
+TABLE_SIZE_M = (0.3, 0.3, 0.01)
+TABLE_TRANSLATION = (
+    CUBE_TRANSLATION_XY[0] - 0.25,
+    CUBE_TRANSLATION_XY[1] + 0.25,
+    0.5 * TABLE_SIZE_M[2] + 0.002,
+)
+
+BASE_TABLE_ROUGHNESS = 0.5
+PERTURBED_TABLE_ROUGHNESS = 0.95
+TABLE_ROUGHNESS_READBACK_ATOL = 1e-3
+
+BASE_TABLE_ALBEDO = 0.5
+PERTURBED_TABLE_ALBEDO = 0.15
+TABLE_ALBEDO_READBACK_ATOL = 1e-3
 
 # Spike 1, README §5.2.1: the measured per-finger aperture that bounds cube.size.
 MEASURED_FINGER_APERTURE_M = 0.04
@@ -383,18 +411,28 @@ class Rig:
     cube_prim: Any
     cube_shader: Any  # UsdShade.Shader, or None if binding resolution failed
     light_prim: Any
+    table_prim: Any
+    table_shader: Any  # UsdShade.Shader, or None if binding resolution failed
     notes: dict[str, Any]
     render_tick: Callable[[], None]
     reset_cadence: Callable[[], None] | None = None
 
 
 def build_rig(args: argparse.Namespace) -> Rig:
-    """Build the smallest scene that can answer §7.5: cube + light + camera.
+    """Build the smallest scene that can answer §7.5: cube + light + table + camera.
 
     No ``InteractiveScene`` and no env-namespace templating -- every prim sits
     at a fixed absolute path this script chose itself, which is the whole
     reason the ``{ENV_REGEX_NS}`` resolution problem Spike 1 needed does not
     come up here (docs/PLAN.md Phase 3b).
+
+    The table is new (docs/PLAN.md Phase 4 follow-up): README §5.2.3 names
+    ``table.roughness``/``table.albedo`` as `style` knobs, but no spike ever
+    built a table prim to test them against, unlike every other knob in this
+    file. Positioned beside the cube, raised just above the ground plane, so
+    it renders in-frame without touching the cube's own footprint or z-fighting
+    the ground -- geometry chosen for visibility, not physical plausibility,
+    since nothing here needs the table to be a rigid body.
     """
     import isaaclab.sim as sim_utils
     import omni.usd
@@ -432,6 +470,14 @@ def build_rig(args: argparse.Namespace) -> Rig:
     )
     cube_cfg.func(CUBE_PATH, cube_cfg, translation=cube_translation)
 
+    table_cfg = sim_utils.CuboidCfg(
+        size=TABLE_SIZE_M,
+        visual_material=sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(BASE_TABLE_ALBEDO, BASE_TABLE_ALBEDO, BASE_TABLE_ALBEDO)
+        ),
+    )
+    table_cfg.func(TABLE_PATH, table_cfg, translation=TABLE_TRANSLATION)
+
     camera_cfg = CameraCfg(
         prim_path=CAMERA_PATH,
         update_period=0.0,
@@ -448,10 +494,11 @@ def build_rig(args: argparse.Namespace) -> Rig:
     stage = omni.usd.get_context().get_stage()
     cube_prim = stage.GetPrimAtPath(CUBE_PATH)
     light_prim = stage.GetPrimAtPath(LIGHT_PATH)
+    table_prim = stage.GetPrimAtPath(TABLE_PATH)
 
     cube_shader = None
     try:
-        shader_name, cube_shader = resolve_cube_shader(cube_prim)
+        shader_name, cube_shader = resolve_bound_shader(cube_prim)
         notes["cube_shader_resolved_via"] = shader_name
     except Exception as exc:
         # A colour-write failure must not take the scale/light/camera checks
@@ -464,6 +511,17 @@ def build_rig(args: argparse.Namespace) -> Rig:
             notes["cube_prim_tree"] = describe_prim_tree(cube_prim)
         except Exception as tree_exc:
             notes["cube_prim_tree"] = f"unavailable: {type(tree_exc).__name__}: {tree_exc}"
+
+    table_shader = None
+    try:
+        shader_name, table_shader = resolve_bound_shader(table_prim)
+        notes["table_shader_resolved_via"] = shader_name
+    except Exception as exc:
+        notes["table_shader_resolved_via"] = f"unresolved: {type(exc).__name__}: {exc}"
+        try:
+            notes["table_prim_tree"] = describe_prim_tree(table_prim)
+        except Exception as tree_exc:
+            notes["table_prim_tree"] = f"unavailable: {type(tree_exc).__name__}: {tree_exc}"
 
     # Applied exactly once, here -- not per check. Measured on the pod: every
     # check after the first re-applied this same preset redundantly (setting
@@ -513,6 +571,8 @@ def build_rig(args: argparse.Namespace) -> Rig:
         cube_prim=cube_prim,
         cube_shader=cube_shader,
         light_prim=light_prim,
+        table_prim=table_prim,
+        table_shader=table_shader,
         notes=notes,
         render_tick=render_tick,
         reset_cadence=cadence_fn,
@@ -522,21 +582,23 @@ def build_rig(args: argparse.Namespace) -> Rig:
     return rig
 
 
-def resolve_cube_shader(cube_prim: Any) -> tuple[str, Any]:
-    """Find the UsdShade.Shader driving the cube's diffuse colour.
+def resolve_bound_shader(prim: Any) -> tuple[str, Any]:
+    """Find the UsdShade.Shader driving ``prim``'s diffuse colour (or any other
+    PreviewSurface input) -- generalised from cube-only, since the table
+    material (README §5.2.3) is resolved the identical way, on a different prim.
 
-    Tries the schema-correct lookup on the cube prim itself first, then walks
-    its whole subtree for a bound material -- measured on the pod: binding-API
-    lookup on ``cube_prim`` directly found nothing (docs/PLAN.md Phase 3b,
-    first run), meaning the spawner most likely nests the actual visual
-    geometry (and its binding) under a child prim rather than binding on
-    ``cube_prim`` itself. The recursive search finds it regardless of naming,
+    Tries the schema-correct lookup on ``prim`` itself first, then walks its
+    whole subtree for a bound material -- measured on the pod: binding-API
+    lookup on ``prim`` directly found nothing for the cube (docs/PLAN.md
+    Phase 3b, first run), meaning the spawner most likely nests the actual
+    visual geometry (and its binding) under a child prim rather than binding
+    on ``prim`` itself. The recursive search finds it regardless of naming,
     which is more robust than guessing another literal path.
     """
     from pxr import Usd, UsdShade
 
     def via_binding_api() -> Any:
-        material, _ = UsdShade.MaterialBindingAPI(cube_prim).ComputeBoundMaterial()
+        material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
         if not material:
             raise RuntimeError("no bound material")
         source, _, _ = material.ComputeSurfaceSource()
@@ -545,23 +607,23 @@ def resolve_cube_shader(cube_prim: Any) -> tuple[str, Any]:
         return source
 
     def via_recursive_binding_search() -> Any:
-        for prim in Usd.PrimRange(cube_prim):
-            material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+        for descendant in Usd.PrimRange(prim):
+            material, _ = UsdShade.MaterialBindingAPI(descendant).ComputeBoundMaterial()
             if not material:
                 continue
             source, _, _ = material.ComputeSurfaceSource()
             if source:
                 return source
-        raise RuntimeError("no descendant of the cube prim has a bound material with a surface")
+        raise RuntimeError("no descendant of the prim has a bound material with a surface")
 
     def via_looks_convention() -> Any:
-        stage = cube_prim.GetStage()
+        stage = prim.GetStage()
         for suffix in (
             "Looks/Material/Shader",
             "Looks/PreviewSurface/Shader",
             "Looks/visualMaterial/Shader",
         ):
-            shader_prim = stage.GetPrimAtPath(cube_prim.GetPath().AppendPath(suffix))
+            shader_prim = stage.GetPrimAtPath(prim.GetPath().AppendPath(suffix))
             if shader_prim and shader_prim.IsValid():
                 return UsdShade.Shader(shader_prim)
         raise RuntimeError("no shader found under the Looks/ convention")
@@ -573,6 +635,21 @@ def resolve_cube_shader(cube_prim: Any) -> tuple[str, Any]:
             ("looks_convention", via_looks_convention),
         ]
     )
+
+
+def get_or_create_shader_input(shader: Any, name: str, sdf_type: Any) -> Any:
+    """``GetInput(name)`` if the shader already declares it, else ``CreateInput``.
+
+    Isaac Lab's ``PreviewSurfaceCfg`` only authors ``diffuseColor`` explicitly
+    (the pattern ``write_cube_hue`` already relies on) -- a standard
+    ``UsdPreviewSurface`` input like ``roughness`` is defined by the schema but
+    may not exist on *this* authored shader at all until something creates it.
+    Duck-typed (only calls ``GetInput``/``CreateInput``) so it's testable
+    without a live stage; the caller passes the real shader and an
+    ``Sdf.ValueTypeNames`` constant.
+    """
+    existing = shader.GetInput(name)
+    return existing if existing is not None else shader.CreateInput(name, sdf_type)
 
 
 def describe_prim_tree(root_prim: Any) -> list[str]:
@@ -750,6 +827,23 @@ def read_light_direction(rig: Rig) -> tuple[float, float, float]:
     return (float(world_direction[0]), float(world_direction[1]), float(world_direction[2]))
 
 
+def read_table_roughness(rig: Rig) -> float:
+    """Read-back for :func:`write_table_roughness` -- ``roughness`` only
+    exists on the shader once something has created the input (see
+    :func:`get_or_create_shader_input`), which the write path always does
+    before this is ever called in :func:`run_knob_check`."""
+    value = rig.table_shader.GetInput("roughness").Get()
+    return float(value) if value is not None else float("nan")
+
+
+def read_table_albedo(rig: Rig) -> float:
+    """``table.albedo`` is one scalar (README §5.2.3, same reasoning as
+    ``cube.hue`` being one hue axis rather than three RGB channels) -- authored
+    as a grey ``diffuseColor`` with r == g == b, so reading channel 0 is enough."""
+    value = rig.table_shader.GetInput("diffuseColor").Get()
+    return float(value[0])
+
+
 def _find_or_add_xform_op(prim: Any, op_type: Any) -> Any:
     """Find an existing xform op of ``op_type`` on ``prim``, or add one.
 
@@ -798,6 +892,37 @@ def reset_cube_to_default(rig: Rig) -> None:
     write_cube_scale(rig, BASE_CUBE_EDGE_M)
     if rig.cube_shader is not None:
         write_cube_hue(rig, BASE_CUBE_HUE)
+
+
+def write_table_roughness(rig: Rig, roughness: float) -> None:
+    """``table.roughness`` via the shader's own ``roughness`` input, the same
+    technique as ``write_cube_hue``'s ``diffuseColor`` write -- raw ``pxr``,
+    not an Isaac-Lab-version-specific convenience wrapper (README §7.5's
+    stated preference). Unlike ``diffuseColor``, ``PreviewSurfaceCfg`` never
+    authors ``roughness`` explicitly, so :func:`get_or_create_shader_input`
+    creates it on first write rather than assuming it already exists.
+    """
+    if rig.table_shader is None:
+        raise CheckFailed("table shader was never resolved -- see scene_builds_and_measures")
+    from pxr import Sdf
+
+    get_or_create_shader_input(rig.table_shader, "roughness", Sdf.ValueTypeNames.Float).Set(
+        float(roughness)
+    )
+
+
+def write_table_albedo(rig: Rig, albedo: float) -> None:
+    if rig.table_shader is None:
+        raise CheckFailed("table shader was never resolved -- see scene_builds_and_measures")
+    from pxr import Gf
+
+    rig.table_shader.GetInput("diffuseColor").Set(Gf.Vec3f(albedo, albedo, albedo))
+
+
+def reset_table_to_default(rig: Rig) -> None:
+    if rig.table_shader is not None:
+        write_table_albedo(rig, BASE_TABLE_ALBEDO)
+        write_table_roughness(rig, BASE_TABLE_ROUGHNESS)
 
 
 def write_light_intensity(rig: Rig, intensity: float) -> None:
@@ -1449,6 +1574,45 @@ def main() -> int:
 
         report.run("camera_jitter_per_capture", check_camera_jitter)
 
+        # -- table.roughness / table.albedo -------------------------------------
+        # README §5.2.3: never spiked before this addition (docs/PLAN.md Phase 4
+        # follow-up) -- no earlier run of this file built a table prim at all.
+        def check_table_roughness() -> dict[str, Any]:
+            current = need_rig()
+            return run_knob_check(
+                current,
+                KnobCheck(
+                    role="table.roughness",
+                    write=lambda v: write_table_roughness(current, v),
+                    read=lambda: read_table_roughness(current),
+                    readback_error=lambda wrote, read: abs(read - wrote),
+                    readback_atol=TABLE_ROUGHNESS_READBACK_ATOL,
+                    base_value=BASE_TABLE_ROUGHNESS,
+                    perturbed_value=PERTURBED_TABLE_ROUGHNESS,
+                ),
+                depth=args.render_depth,
+            )
+
+        report.run("table_roughness", check_table_roughness)
+
+        def check_table_albedo() -> dict[str, Any]:
+            current = need_rig()
+            return run_knob_check(
+                current,
+                KnobCheck(
+                    role="table.albedo",
+                    write=lambda v: write_table_albedo(current, v),
+                    read=lambda: read_table_albedo(current),
+                    readback_error=lambda wrote, read: abs(read - wrote),
+                    readback_atol=TABLE_ALBEDO_READBACK_ATOL,
+                    base_value=BASE_TABLE_ALBEDO,
+                    perturbed_value=PERTURBED_TABLE_ALBEDO,
+                ),
+                depth=args.render_depth,
+            )
+
+        report.run("table_albedo", check_table_albedo)
+
         # -- exposure ----------------------------------------------------------
         def check_exposure_lever() -> dict[str, Any]:
             current = need_rig()
@@ -1536,6 +1700,9 @@ def main() -> int:
             )
             aim_camera(current, jitter_xy=PERTURBED_CAMERA_JITTER)
             apply_carb_settings(EXPOSURE_CANDIDATES)
+            if current.table_shader is not None:
+                write_table_roughness(current, PERTURBED_TABLE_ROUGHNESS)
+                write_table_albedo(current, PERTURBED_TABLE_ALBEDO)
 
             after = read_cube_translation(current)
             delta = max(abs(a - b) for a, b in zip(before, after, strict=True))
@@ -1549,6 +1716,7 @@ def main() -> int:
             )
             aim_camera(current, jitter_xy=BASE_CAMERA_JITTER)
             apply_carb_settings({})
+            reset_table_to_default(current)
 
             facts = {
                 "cube_translation_before": before,

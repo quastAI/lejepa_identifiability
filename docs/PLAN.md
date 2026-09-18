@@ -416,6 +416,55 @@ separately (experiments E–I below), and it's a different kind of finding.**
 
 ---
 
+## Phase 3d — Spike 5, the missing knob: `table.roughness` / `table.albedo`
+
+> Identified while scoping Phase 4's Isaac-facing backend (below): every
+> other README §5.2.3 `style` knob had a Round-1 or Round-2 verdict in §7.5
+> except these two, because no run of `spikes/spike_dynamic_attrs.py` ever
+> built a table prim at all — the knob wasn't blocked, it was never spiked.
+> **Written now, not run yet** — this is the pod-side gate the minimal
+> Isaac backend (Phase 4) needs an answer to before it can decide whether
+> `table.*` is included or refused at `bind()`.
+
+- [x] 🤖 **Add a table prim + the same three-question recipe.** `build_rig()`
+  now spawns `/World/Table` — a small flat `CuboidCfg` slab, offset beside the
+  cube rather than under it and raised 2mm above the ground plane, so it
+  renders in-frame without touching the cube's footprint or z-fighting the
+  ground it sits on. `resolve_cube_shader` generalised to `resolve_bound_shader(prim)`
+  (identical logic, now shared between the cube and the table — no behaviour
+  change for the cube). `table.roughness` writes through a new
+  `get_or_create_shader_input()` helper, because `PreviewSurfaceCfg` only
+  authors `diffuseColor` explicitly (the pattern `write_cube_hue` already
+  relies on) — a standard `UsdPreviewSurface` input like `roughness` is
+  defined by the schema but may not exist on the authored shader at all until
+  something creates it, unlike `diffuseColor`, which is already there.
+  `table.albedo` reuses the exact `diffuseColor`-write technique cube.hue
+  already uses (one scalar, authored as a grey `r == g == b`, same reasoning
+  as one hue axis instead of three RGB channels, §5.2.2). Also folded into
+  `cross_talk_style_leaves_base_unchanged` (table is a style knob too) at no
+  extra pod cost.
+  - `tests/test_spike_dynamic_attrs.py` gained coverage for
+    `get_or_create_shader_input` against a duck-typed fake shader (reuses an
+    already-declared input, creates a missing one) — everything below the
+    "Isaac layer" banner, same split as the rest of this file. 31/31 tests in
+    that file, 176 collected / 174 passed / 2 skipped repo-wide, `ruff check`
+    green locally as of 2026-09-18.
+- [ ] 🧑 **Run it on the pod, paste the table.** Same command as before —
+  `./isaaclab.sh -p spikes/spike_dynamic_attrs.py --out /idtb/data/spike_attrs`
+  — no new CLI flag, `table_roughness` and `table_albedo` just appear as two
+  more rows. Everything else in the table should reproduce exactly what §7.5
+  already reports; a change anywhere else would itself be a finding (the
+  table prim is new geometry in frame, so a widened noise floor or a shifted
+  `cube.*` number is possible and worth flagging, not assumed benign).
+- [ ] 🤖 **Fold the verdict into README §5.2.3/§7.5/§3.2 and into the Phase 4
+  Isaac backend's declared role list**, whichever way it comes back — clean
+  (both knobs join `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/
+  `cam.jitter`/`exposure` in the backend's supported set) or blocked (recorded
+  next to `light.azimuth_elevation` as a scoped, carried-forward item rather
+  than silently dropped).
+
+---
+
 ## Phase 4 — Build against verified reality
 
 > **Scope note on "verified": Spike 1/2 only cover physics-state writes** (joint angles, rigid-body pose) — README §5.2's `base` group. Every `full` and `style` latent (cube size and colour; lighting, per-sample camera jitter, exposure, materials) uses a write path that hasn't been touched. **Phase 3b is the gate**: don't wire any of those into `SceneBackend`/`generate.py` as a first-class latent before that spike has a verdict. The `base`-only pipeline does not wait on it.

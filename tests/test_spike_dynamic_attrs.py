@@ -358,6 +358,56 @@ def test_resolve_render_tick_defaults_to_sim_render():
     assert desc == "sim.render()"
 
 
+# --- get_or_create_shader_input: table.roughness's fallback-create path --------
+
+
+class _FakeShaderInput:
+    def __init__(self, value=None):
+        self.value = value
+
+    def Set(self, value):
+        self.value = value
+
+
+class _FakeShader:
+    """Duck-typed ``UsdShade.Shader`` stand-in -- only ``GetInput``/``CreateInput``
+    matter to :func:`get_or_create_shader_input`, same technique as this file's
+    own :func:`resolve_bound_shader` test fakes below."""
+
+    def __init__(self, declared=None):
+        self._inputs = dict(declared or {})
+        self.created: list[tuple[str, object]] = []
+
+    def GetInput(self, name):
+        return self._inputs.get(name)
+
+    def CreateInput(self, name, sdf_type):
+        self.created.append((name, sdf_type))
+        new_input = _FakeShaderInput()
+        self._inputs[name] = new_input
+        return new_input
+
+
+def test_get_or_create_shader_input_reuses_an_already_declared_input():
+    existing = _FakeShaderInput(0.5)
+    shader = _FakeShader(declared={"roughness": existing})
+
+    result = spike.get_or_create_shader_input(shader, "roughness", "Float")
+
+    assert result is existing
+    assert shader.created == []
+
+
+def test_get_or_create_shader_input_creates_a_missing_input():
+    shader = _FakeShader()
+
+    result = spike.get_or_create_shader_input(shader, "roughness", "Float")
+
+    assert shader.created == [("roughness", "Float")]
+    result.Set(0.9)
+    assert shader.GetInput("roughness").value == 0.9
+
+
 # --- reused pure layer, sanity that the load actually worked --------------------
 
 

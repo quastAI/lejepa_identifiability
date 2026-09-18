@@ -61,7 +61,7 @@ The purpose of this section is to keep the plan honest about the difference betw
 | **`TiledCamera` is safe to use** | §7.2 Spike 4. Identical frame statistics to `Camera`, and correctly distinguishes two envs holding different states — no sign of [IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)'s tile corruption on this build. Worth the throughput win with no observed downside. |
 | **Isaac's camera sensor output is an aliased, reused buffer — always `.clone()` immediately** | §7.2 Spike 1 (unplanned finding). `camera.data.output[...]` returns the same underlying tensor across calls, on every render mode tried; a caller that doesn't clone before the next capture silently observes the wrong frame. Permanent constraint on `writer.py`/`generate.py`, not a settings choice. |
 | The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. **Built, Phase 4** — `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`. |
-| **An Isaac-facing `SceneBackend` is not built yet, deliberately** | Phase 4 (docs/PLAN.md). Every role either needs a spike-verified write path or gets refused at `bind()` via `UnsupportedRoleError` — `table.roughness`/`table.albedo` were never spiked at all, and `light.azimuth`/`light.elevation` is confirmed blocked (§7.5). Building the "obvious" version now would mean guessing on both, which the project has refused to do since Phase 3. §7.4's known-limit note already predicts this backend gets rewritten once scene v1 replaces the spike scene's `DistantLight` — a further reason not to build it ahead of that need. The tier-1 contract suite (`tests/contract/`) is written to take a second backend with no rewrite once one exists. |
+| **An Isaac-facing `SceneBackend` is not built yet, deliberately** | Phase 4 (docs/PLAN.md). Every role either needs a spike-verified write path or gets refused at `bind()` via `UnsupportedRoleError` — `light.azimuth`/`light.elevation` is confirmed blocked (§7.5). `table.roughness`/`table.albedo` were never spiked at all as of the Phase 4 scope decision; the spike for them is now **written** (docs/PLAN.md Phase 3d, `spikes/spike_dynamic_attrs.py`) but not yet run on the pod, so they stay unresolved for the same reason in the meantime. Building the "obvious" backend before either verdict lands would mean guessing on at least one of them, which the project has refused to do since Phase 3. §7.4's known-limit note already predicts this backend gets rewritten once scene v1 replaces the spike scene's `DistantLight` — a further reason not to build it ahead of that need. The tier-1 contract suite (`tests/contract/`) is written to take a second backend with no rewrite once one exists. |
 | Tests accompany every module; the §10.1 correctness gates are executable tests | §10.3. |
 | One installable package `src/idtb/`, never top-level `sim`/`gen`/`eval` | Those names collide with Kit extensions on Isaac's `sys.path`, and `eval` shadows a builtin. §4.6. |
 | Handles are keyed by **role** (`arm.j0`, `cube.x`), not by Franka joint name | §6.2. A spec keyed on asset-specific names cannot be shared with the mock, which makes the tier-1 contract suite impossible. |
@@ -91,6 +91,7 @@ The purpose of this section is to keep the plan honest about the difference betw
 | ~~Which `full`/`style` knobs are writable at all, and through which API call~~ | **Resolved, §7.5.** `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter` are all writable and bitwise-deterministic under the revised `standard` (adds `resetPtAccumOnAnimTimeChange=True`). `light.azimuth_elevation` is writable (confirmed exact via read-back) but has no measurable effect on the render in any tested config — blocked, scoped to this spike scene's `DistantLight`, re-test against scene v1's light rig before deciding its fate (§11). | — |
 | **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the determinism blocker (§7.5) is resolved for every handle except `light.azimuth_elevation`, so this is open work now, not blocked work. | Phase 3 / Phase 2 |
 | ~~Whether `exposure` has a usable lever at all~~ | **Resolved, §7.5.** Three carb keys accepted and measured to move pixels, and bitwise-deterministic under the revised `standard`. | — |
+| **Whether `table.roughness`/`table.albedo` are writable and bitwise-deterministic** | Spiked (docs/PLAN.md Phase 3d, `spikes/spike_dynamic_attrs.py`'s new `table_roughness`/`table_albedo` checks), not yet run on the pod. Blocks the Phase 4 Isaac-facing backend from declaring these two roles either way (§3.1). | Phase 3d |
 
 The four Spike questions that used to live in this table (render mode/preset, physics-step requirement, accumulation depth N, `TiledCamera` vs. `Camera`) are all answered — moved to §3.1, §7.2.
 
@@ -187,7 +188,7 @@ class SceneBackend(Protocol):
 ```
 
 - **`MockSceneBackend`** (`src/idtb/sim/mock.py`, **built**) — an analytic numpy renderer: anti-aliased sprites for the cube (position/size/hue) and a joint-driven arm marker, plus a global style tone (light, camera jitter, table, exposure). Deterministic and injective *by construction*, no RNG anywhere.
-- **An Isaac-facing backend** — real, lazy-imports Isaac, runs remotely. **Not built yet, deliberately** (§3.1, docs/PLAN.md Phase 4): `bind()` exists precisely so a backend can declare partial support and fail loudly on the rest, but every currently-unverified or blocked `full`/`style` write path (`table.*`, `light.azimuth`/`light.elevation`) would have to be faked or omitted to build one today, and §7.4 already predicts this backend gets rewritten once scene v1 replaces the spike scene's light rig.
+- **An Isaac-facing backend** — real, lazy-imports Isaac, runs remotely. **Not built yet, deliberately** (§3.1, docs/PLAN.md Phase 4): `bind()` exists precisely so a backend can declare partial support and fail loudly on the rest, but every currently-unverified or blocked `full`/`style` write path (`table.*` — spiked, docs/PLAN.md Phase 3d, verdict pending a pod run; `light.azimuth`/`light.elevation` — confirmed blocked, §7.5) would have to be faked or omitted to build one today, and §7.4 already predicts this backend gets rewritten once scene v1 replaces the spike scene's light rig.
 
 The mock is not a convenience. It does two jobs:
 
@@ -431,7 +432,7 @@ what the §7.5 attribute spike is for.
 | `light.warmth` | Light colour temperature | USD light attribute | Kept on a 1-D warmth axis, for the same reason `cube.hue` is 1-D. |
 | `light.azimuth`, `light.elevation` | Key-light direction — "lighting jitter" | light prim transform | Shadow direction is the most visually salient style cue, and therefore the strongest test of invariance. |
 | `cam.jitter.*` | Per-capture camera pose jitter about the nominal view | `set_world_poses_from_view`, **per capture** | Spike 1 aimed the camera once, at boot. Per-sample re-aiming is a different usage pattern and gets its own check. Radius stays small enough that §5.3's occlusion geometry is not substantially changed. |
-| `table.roughness`, `table.albedo` | Table material | USD material attribute | Continuous, so they squash cleanly. |
+| `table.roughness`, `table.albedo` | Table material | USD material attribute (`PreviewSurface.roughness`/`diffuseColor`, grey) | Continuous, so they squash cleanly. **Spiked, verdict pending** (docs/PLAN.md Phase 3d) — written into `spikes/spike_dynamic_attrs.py`, not yet run on the pod. |
 | `exposure` | Post-process exposure | carb / post-process setting, **if one exists** | Locating the lever is itself a spike question. |
 
 > ### ⚠ Categorical style factors do not fit inside *z*
@@ -803,7 +804,7 @@ jittered ad hoc inside the scene setup.
 - **Camera:** fixed intrinsics, high oblique angle, 2–3 views per §5.3. Intrinsics logged to dataset metadata and **held constant**; extrinsics carry a small `style` jitter about the nominal pose, bounded so §5.3's occlusion geometry is not substantially changed.
 - **Categorical factors stay out of *z*:** room swaps and discrete material choices are not squashable Gaussians (§5.2.3's box) and run as cross-dataset ablations instead.
 
-### 7.5 Spike 5 — the attribute write paths (`full` and `style`): resolved, one latent still blocked
+### 7.5 Spike 5 — the attribute write paths (`full` and `style`): resolved, two latents still open
 
 `spikes/spike_dynamic_attrs.py` (docs/PLAN.md Phase 3b/3c) ran Spikes 1–4's
 three-question recipe (does the write land, does it move pixels, is it still
@@ -886,6 +887,14 @@ render question:**
 Motion blur is a **separate, expected, understood FAIL**: blur implies motion
 over time and this pipeline has none by design (§5.5) — a completed check,
 same category as Spike 1's aliasing FAIL.
+
+**`table.roughness`/`table.albedo` — spiked, verdict pending a pod run
+(docs/PLAN.md Phase 3d).** Every knob above got a Round-1 or Round-2 verdict;
+these two didn't, because no run of this spike ever built a table prim —
+`§5.2.3` named them but nothing ever tested them. `build_rig()` now spawns
+one and `run_knob_check` covers both the same way as everything else; this is
+newly written, not yet run on the pod, so it stays unresolved rather than
+assumed clean or assumed blocked.
 
 
 ## 8. Infrastructure
