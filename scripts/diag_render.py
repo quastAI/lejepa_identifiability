@@ -23,6 +23,13 @@ AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args(["--headless"])
 app = launch(args)
 
+import carb.settings  # noqa: E402
+
+_settings = carb.settings.get_settings()
+print("updateToUsd_before_scene_build", _settings.get("/physics/updateToUsd"), flush=True)
+_settings.set_bool("/physics/updateToUsd", True)
+_settings.set_bool("/physics/updateVelocitiesToUsd", True)
+
 from idtb.latents import Handle, LatentSpec  # noqa: E402
 from idtb.sim.scene import IsaacSceneBackend  # noqa: E402
 
@@ -42,14 +49,7 @@ spec = LatentSpec(
 backend = IsaacSceneBackend()
 backend.bind(spec)
 print("PLAYING", backend._rig.sim.is_playing(), flush=True)
-
-import carb.settings  # noqa: E402
-
-_settings = carb.settings.get_settings()
-print("updateToUsd_before", _settings.get("/physics/updateToUsd"), flush=True)
-_settings.set_bool("/physics/updateToUsd", True)
-_settings.set_bool("/physics/updateVelocitiesToUsd", True)
-print("updateToUsd_after", _settings.get("/physics/updateToUsd"), flush=True)
+print("updateToUsd_after_scene_build", _settings.get("/physics/updateToUsd"), flush=True)
 
 n = spec.n
 base_z = torch.zeros(1, n)
