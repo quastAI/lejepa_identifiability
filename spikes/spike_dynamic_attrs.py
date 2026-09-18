@@ -274,6 +274,7 @@ LIGHT_WARMTH_READBACK_ATOL = 1e-3
 
 BASE_LIGHT_AZIMUTH_ELEVATION = (0.0, math.radians(35.0))
 PERTURBED_LIGHT_AZIMUTH_ELEVATION = (math.radians(120.0), math.radians(55.0))
+LIGHT_DIRECTION_READBACK_ATOL = 1e-3  # unit-vector components
 
 BASE_CAMERA_JITTER = (0.0, 0.0)
 PERTURBED_CAMERA_JITTER = (0.05, -0.04)
@@ -726,6 +727,27 @@ def read_light_warmth(rig: Rig) -> float:
     from pxr import UsdLux
 
     return float(UsdLux.LightAPI(rig.light_prim).GetColorTemperatureAttr().Get())
+
+
+def read_light_direction(rig: Rig) -> tuple[float, float, float]:
+    """World-space direction the light emits along (its local -Z, composed
+    through the prim's transform) -- the ground-truth read-back for
+    :func:`write_light_direction`, added after external research
+    (docs/research_task_light_direction_dead_knob.md) flagged that this is the
+    one knob in this file whose write was never actually verified to land in
+    USD. Every other knob has a `read`/`readback_error` pair in its
+    `KnobCheck` (cube.size's bbox, cube.hue's shader input, light.intensity/
+    warmth's attributes); `light.azimuth_elevation` did not, so a silently
+    orphaned xform op (not in `xformOpOrder`) or a wrong `Gf.Rotation.Decompose`
+    angle order could have gone undetected the whole time -- exactly the
+    `_find_or_add_xform_op` failure mode already documented for `cube.size`,
+    just never checked here.
+    """
+    from pxr import Gf, UsdGeom
+
+    matrix = UsdGeom.Xformable(rig.light_prim).ComputeLocalToWorldTransform(0)
+    world_direction = matrix.TransformDir(Gf.Vec3d(0, 0, -1)).GetNormalized()
+    return (float(world_direction[0]), float(world_direction[1]), float(world_direction[2]))
 
 
 def _find_or_add_xform_op(prim: Any, op_type: Any) -> Any:
@@ -1298,6 +1320,11 @@ def main() -> int:
                 KnobCheck(
                     role="light.azimuth_elevation",
                     write=write_direction,
+                    read=lambda: read_light_direction(current),
+                    readback_error=lambda wrote, read: max(
+                        abs(a - b) for a, b in zip(azel_to_direction(*wrote), read, strict=True)
+                    ),
+                    readback_atol=LIGHT_DIRECTION_READBACK_ATOL,
                     base_value=BASE_LIGHT_AZIMUTH_ELEVATION,
                     perturbed_value=PERTURBED_LIGHT_AZIMUTH_ELEVATION,
                 ),
@@ -1305,6 +1332,77 @@ def main() -> int:
             )
 
         report.run("light_direction", check_light_direction)
+
+        # -- external research follow-up (docs/research_task_light_direction_dead_knob.md) --
+        # E3: does rotating the light produce a real effect only when paired with a
+        # trivial parameter (intensity) write? Tests the "Hydra separates DirtyTransform
+        # from DirtyParams, and the render config we're using drops the former" theory.
+        # Diagnostic only -- reports numbers, never fails.
+        def check_light_direction_needs_dirty_param() -> dict[str, Any]:
+            current = need_rig()
+            capture = make_capture_static(current, depth=args.render_depth)
+            nudge_factor = 1.000001  # negligible on its own; just forces a param write
+
+            def set_state(azel: tuple[float, float], nudged: bool) -> None:
+                write_light_direction(current, azimuth_rad=azel[0], elevation_rad=azel[1])
+                intensity = BASE_LIGHT_INTENSITY * nudge_factor if nudged else BASE_LIGHT_INTENSITY
+                write_light_intensity(current, intensity)
+
+            set_state(BASE_LIGHT_AZIMUTH_ELEVATION, False)
+            frame_base = capture(None).clone()
+            set_state(BASE_LIGHT_AZIMUTH_ELEVATION, True)
+            frame_base_nudged = capture(None).clone()
+            set_state(PERTURBED_LIGHT_AZIMUTH_ELEVATION, False)
+            frame_perturbed = capture(None).clone()
+            set_state(PERTURBED_LIGHT_AZIMUTH_ELEVATION, True)
+            frame_perturbed_nudged = capture(None).clone()
+            set_state(BASE_LIGHT_AZIMUTH_ELEVATION, False)  # restore
+
+            mad_rotation_alone = mean_abs_diff(frame_base, frame_perturbed)
+            mad_nudge_alone = mean_abs_diff(frame_base, frame_base_nudged)
+            mad_rotation_with_nudge = mean_abs_diff(frame_base_nudged, frame_perturbed_nudged)
+            return {
+                "mad_rotation_alone": mad_rotation_alone,
+                "mad_nudge_alone": mad_nudge_alone,
+                "mad_rotation_plus_nudge_vs_nudge_baseline": mad_rotation_with_nudge,
+                "coupled_effect_beyond_nudge": mad_rotation_with_nudge - mad_nudge_alone,
+            }
+
+        report.run(
+            "light_direction_needs_dirty_param_write", check_light_direction_needs_dirty_param
+        )
+
+        # E4: rotate a non-light mesh (the ground plane, tilted about X so it's
+        # visually distinguishable -- a rotation about its own normal, Z, would be
+        # a no-op for a flat plane regardless of the renderer) under the same
+        # config, to separate "rotation writes are broken in general" from
+        # "this is specific to lights". Diagnostic only.
+        def check_mesh_rotation_control() -> dict[str, Any]:
+            from pxr import Gf, UsdGeom
+
+            current = need_rig()
+            stage = current.cube_prim.GetStage()
+            ground_prim = stage.GetPrimAtPath(GROUND_PATH)
+            capture = make_capture_static(current, depth=args.render_depth)
+
+            def write_ground_tilt(degrees_about_x: float) -> None:
+                op = _find_or_add_xform_op(ground_prim, UsdGeom.XformOp.TypeRotateXYZ)
+                op.Set(Gf.Vec3f(degrees_about_x, 0.0, 0.0))
+
+            write_ground_tilt(0.0)
+            frame_base = capture(None).clone()
+            write_ground_tilt(10.0)
+            frame_tilted = capture(None).clone()
+            write_ground_tilt(0.0)  # restore
+
+            return {
+                "mad_ground_tilt": mean_abs_diff(frame_base, frame_tilted),
+                "note": "rotating the ground plane (a mesh, not a light) under the same "
+                "render config as light_direction -- distinguishes 'rotation writes are "
+                "broken in general' from 'this is specific to lights'",
+            }
+
+        report.run("mesh_rotation_control", check_mesh_rotation_control)
 
         # -- cam.jitter.* -----------------------------------------------------
         def check_camera_jitter() -> dict[str, Any]:
@@ -1530,6 +1628,13 @@ def main() -> int:
                     saved[role] = {
                         "order_independent_a1_vs_a2": diff_summary(a1, a2),
                         "back_to_back_b1_vs_b2": diff_summary(b1, b2),
+                        # Absolute stats, not just diffs (external research
+                        # experiment E1) -- a diff of exactly 0.0 between two
+                        # all-black or constant-colour frames looks identical
+                        # to a diff of 0.0 between two correctly-lit but
+                        # identical frames; this tells them apart.
+                        "frame_stats_a1": frame_stats(a1),
+                        "frame_stats_b1": frame_stats(b1),
                     }
                 return {"frames_dir": str(frames_dir), "saved": saved}
 
