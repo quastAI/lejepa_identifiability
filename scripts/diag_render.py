@@ -1,16 +1,11 @@
 """Throwaway diagnostic for the base-group render-staleness bug (not part of
 the test suite or the public API) -- delete once the bug is resolved.
 
-The isolated single-dim hue-only + sim.step() test just PASSED cleanly
-(max=113, mean=0.074 -- real signal, close to the original no-step
-baseline of 120/0.148). So sim.step() + material write are NOT
-fundamentally incompatible. The earlier 4-case sequential test (base ->
-arm_only -> cube_only -> hue_only, full 8-dim spec, each case a real
-sim.step()) regressed hue to near-zero. This test isolates *why*: does
-having arm+cube dims in the same spec as hue matter (spec composition),
-or does it take multiple prior sim.step() calls to degrade the signal
-(call-count accumulation)? Two cases only: base -> hue_only, same 8-dim
-spec, skipping arm_only/cube_only entirely.
+Full re-test of the fix now applied to `write_latent_state()` itself
+(real `sim.step(render=False)` in place of `sim.forward()` +
+`_advance_anim_time_epsilon()`, plus `set_joint_position_target` to zero
+PD error at the write). This uses the real production `write_state()`
+path directly -- no manual step()/epsilon calls in this script anymore.
 
 Run: /workspace/isaaclab/isaaclab.sh -p scripts/diag_render.py 2>&1 | grep -E "READ_|FRAME_"
 """
@@ -48,25 +43,24 @@ backend.bind(spec)
 
 n = spec.n
 base_z = torch.zeros(1, n)
+arm_z = base_z.clone()
+arm_z[0, 0:5] = 1.0
+cube_z = base_z.clone()
+cube_z[0, 5:7] = 1.0
 hue_z = base_z.clone()
 hue_z[0, 7] = 1.0
 
-phi_base = spec.squash(base_z)
-phi_hue = spec.squash(hue_z)
+cases = {"base": base_z, "arm_only": arm_z, "cube_only": cube_z, "hue_only": hue_z}
+frames = {}
+for name, z in cases.items():
+    phi = spec.squash(z)
+    backend.write_state(phi)
+    read = backend.read_state()
+    print(f"READ_{name}", read, flush=True)
+    backend.render(0)  # discarded settle render
+    frames[name] = backend.render(1)["cam0"]["rgb"].clone()
 
-backend.write_state(phi_base)
-backend._rig.sim.step(render=False)
-read_base = backend.read_state()
-backend.render(0)
-frame_base = backend.render(1)["cam0"]["rgb"].clone()
-
-backend.write_state(phi_hue)
-backend._rig.sim.step(render=False)
-read_hue = backend.read_state()
-backend.render(0)
-frame_hue = backend.render(1)["cam0"]["rgb"].clone()
-
-print("READ_base", read_base, flush=True)
-print("READ_hue", read_hue, flush=True)
-d = (frame_base.float() - frame_hue.float()).abs()
-print(f"FRAME_DIFF max={d.max().item():.4f} mean={d.mean().item():.6f}", flush=True)
+base_frame = frames["base"].float()
+for name in ("arm_only", "cube_only", "hue_only"):
+    d = (frames[name].float() - base_frame).abs()
+    print(f"FRAME_{name}_vs_base max={d.max().item():.4f} mean={d.mean().item():.6f}", flush=True)

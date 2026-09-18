@@ -89,10 +89,23 @@ def split_camera_jitter(spec: LatentSpec, phi: Tensor) -> tuple[float, float]:
 def write_latent_state(rig: Rig, spec: LatentSpec, phi: Tensor) -> None:
     """Teleport to squashed physical state `phi`, shape `[1, n]`.
 
-    No physics stepping (README §5.5). Dispatches by write path (README
-    §6.3): joint columns and the root pose are staged into batched tensors
-    and written once each; every attribute write applies immediately,
-    since each is its own USD/carb call with no batched equivalent.
+    Dispatches by write path (README §6.3): joint columns and the root pose
+    are staged into batched tensors and written once each; every attribute
+    write applies immediately, since each is its own USD/carb call with no
+    batched equivalent.
+
+    Confirmed on the pod (and matching isaac-sim/IsaacLab#6394): a plain
+    `sim.forward()` is not enough to make a joint/root-state write show up
+    in a render -- Fabric-mirrored transforms only get republished by
+    PhysX's own `simulate()`/`fetch_results()` cycle, which only
+    `sim.step()` calls. README §5.5's original "no physics stepping"
+    policy assumed `forward()` was sufficient; it wasn't. A real
+    `sim.step(render=False)` is currently the *only* public path that
+    republishes a tensor-API write to the renderer (IsaacLab#7138, which
+    would add a lighter zero-dynamics alternative, is open/unmerged). We
+    also set the joint position *target*, not just the state, so the PD
+    controller has zero error at the moment of that step and doesn't drift
+    the write during it -- confirmed by measurement, zero drift observed.
     """
     if phi.shape[0] != 1:
         raise ValueError(f"write_latent_state supports B=1 only, got shape {tuple(phi.shape)}")
@@ -134,6 +147,7 @@ def write_latent_state(rig: Rig, spec: LatentSpec, phi: Tensor) -> None:
     root[:, 0:3] += rig.scene.env_origins
     root[:, 7:] = 0.0  # linear + angular velocity (README §4.4)
 
+    rig.robot.set_joint_position_target(joint_pos)
     rig.robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos))
     rig.cube.write_root_pose_to_sim(root[:, :7])
     rig.cube.write_root_velocity_to_sim(torch.zeros_like(root[:, 7:]))
@@ -142,10 +156,7 @@ def write_latent_state(rig: Rig, spec: LatentSpec, phi: Tensor) -> None:
     _aim_camera(rig, jitter_xy=(dx, dy))
 
     rig.scene.write_data_to_sim()
-    rig.sim.forward()  # flush USD/Fabric, no time advance (README §4.5) --
-    # the renderer reads transforms from Fabric; without this the rendered
-    # image never picks up the write even though `.data.*` read-back does.
-    _advance_anim_time_epsilon()
+    rig.sim.step(render=False)  # republishes the write to Fabric (see docstring)
 
 
 def read_latent_state(rig: Rig, spec: LatentSpec) -> Tensor:
@@ -256,19 +267,6 @@ def _read_light_warmth(light_prim: Any) -> float:
     from pxr import UsdLux
 
     return float(UsdLux.LightAPI(light_prim).GetColorTemperatureAttr().Get())
-
-
-def _advance_anim_time_epsilon() -> None:
-    """Force the `standard` preset's `resetPtAccumOnAnimTimeChange` (README
-    §7.3) to fire without stepping physics -- joint/root-state writes land
-    straight in PhysX/Fabric buffers with no USD change notice, unlike an
-    attribute `Set()` call, so nothing else tells the path tracer the scene
-    changed. Bumping the timeline's current time is the one anim-time
-    trigger that doesn't require `sim.step()` (README §5.5)."""
-    import omni.timeline
-
-    timeline = omni.timeline.get_timeline_interface()
-    timeline.set_current_time(timeline.get_current_time() + 1e-6)
 
 
 def _aim_camera(rig: Rig, *, jitter_xy: tuple[float, float]) -> None:
