@@ -1,12 +1,14 @@
 """Throwaway diagnostic for the base-group render-staleness bug (not part of
 the test suite or the public API) -- delete once the bug is resolved.
 
-Writes two well-separated `base`-group states directly through
-`IsaacSceneBackend`, bypassing pytest, and prints read-back + frame stats for
-both so we can tell whether the physics write reaches Fabric (`READ_DIFF`)
-independently of whether it reaches the renderer (`FRAME_DIFF`).
+Splits the previous all-dims-at-once probe into three cases -- arm-only,
+cube-only, and both -- to tell whether the articulation (arm) and the
+kinematic-enabled RigidObject (cube) are stuck for the same reason or two
+different ones: `update_articulations_kinematic()` (found by grepping
+isaaclab_physx's `physx_manager.py`) is articulation-specific and gated on
+`sim.is_playing()`, so it may fix the arm without touching the cube at all.
 
-Run: /workspace/isaaclab/isaaclab.sh -p scripts/diag_render.py 2>&1 | grep -E "READ_|FRAME_"
+Run: /workspace/isaaclab/isaaclab.sh -p scripts/diag_render.py 2>&1 | grep -E "READ_|FRAME_|PLAYING"
 """
 
 import argparse
@@ -38,21 +40,27 @@ spec = LatentSpec(
 
 backend = IsaacSceneBackend()
 backend.bind(spec)
+print("PLAYING", backend._rig.sim.is_playing(), flush=True)
 
-phi_a = spec.squash(torch.zeros(1, spec.n))
-phi_b = spec.squash(torch.ones(1, spec.n))
+base_z = torch.zeros(1, spec.n)
+arm_z = base_z.clone()
+arm_z[0, 0:5] = 1.0  # arm.j0..j3 + gripper.aperture
+cube_z = base_z.clone()
+cube_z[0, 5:7] = 1.0  # cube.x, cube.y
+both_z = base_z.clone()
+both_z[0, :] = 1.0
 
-backend.write_state(phi_a)
-read_a = backend.read_state()
-frame_a = backend.render(0)["cam0"]["rgb"].clone()
+cases = {"base": base_z, "arm_only": arm_z, "cube_only": cube_z, "both": both_z}
+frames = {}
+reads = {}
+for name, z in cases.items():
+    phi = spec.squash(z)
+    backend.write_state(phi)
+    reads[name] = backend.read_state()
+    frames[name] = backend.render(0)["cam0"]["rgb"].clone()
+    print(f"READ_{name}", reads[name], flush=True)
 
-backend.write_state(phi_b)
-read_b = backend.read_state()
-frame_b = backend.render(1)["cam0"]["rgb"].clone()
-
-print("READ_A", read_a, flush=True)
-print("READ_B", read_b, flush=True)
-print("READ_DIFF", (read_a - read_b).abs().max().item(), flush=True)
-print("FRAME_A stats", frame_a.float().mean().item(), frame_a.float().std().item(), flush=True)
-print("FRAME_B stats", frame_b.float().mean().item(), frame_b.float().std().item(), flush=True)
-print("FRAME_DIFF", (frame_a.float() - frame_b.float()).abs().max().item(), flush=True)
+base_frame = frames["base"].float()
+for name in ("arm_only", "cube_only", "both"):
+    diff = (frames[name].float() - base_frame).abs().max().item()
+    print(f"FRAME_DIFF_{name}_vs_base", diff, flush=True)
