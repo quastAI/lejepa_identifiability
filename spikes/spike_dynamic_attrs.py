@@ -1447,6 +1447,14 @@ def main() -> int:
                         PERTURBED_LIGHT_INTENSITY,
                     ),
                     (
+                        "light.azimuth_elevation",
+                        lambda azel: write_light_direction(
+                            current, azimuth_rad=azel[0], elevation_rad=azel[1]
+                        ),
+                        BASE_LIGHT_AZIMUTH_ELEVATION,
+                        PERTURBED_LIGHT_AZIMUTH_ELEVATION,
+                    ),
+                    (
                         "cam.jitter",
                         lambda xy: aim_camera(current, jitter_xy=xy),
                         BASE_CAMERA_JITTER,
