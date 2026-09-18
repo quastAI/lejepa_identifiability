@@ -261,8 +261,8 @@ def _aim_camera(rig: Rig, *, jitter_xy: tuple[float, float]) -> None:
     dx, dy = jitter_xy
     origin = rig.scene.env_origins[0]
     eye_xyz = [rig.camera_eye[0] + dx, rig.camera_eye[1] + dy, rig.camera_eye[2]]
-    eye = origin + torch.tensor(eye_xyz)
-    target = origin + torch.tensor(list(rig.camera_target))
+    eye = origin + torch.tensor(eye_xyz, device=origin.device)
+    target = origin + torch.tensor(list(rig.camera_target), device=origin.device)
     rig.camera.set_world_poses_from_view(eye.unsqueeze(0), target.unsqueeze(0))
     rig.pending_jitter = jitter_xy
 

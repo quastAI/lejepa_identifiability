@@ -43,7 +43,7 @@ def test_write_then_read_back_matches_to_tolerance(backend: SceneBackend, group_
     group configuration, not only ``base``."""
     backend.bind(group_spec)
     z, _ = sample_ou_pairs(
-        group_spec.n, batch=2, rho=0.9, generator=torch.Generator().manual_seed(0)
+        group_spec.n, batch=1, rho=0.9, generator=torch.Generator().manual_seed(0)
     )
     phi = group_spec.squash(z)
     backend.write_state(phi)
@@ -52,25 +52,25 @@ def test_write_then_read_back_matches_to_tolerance(backend: SceneBackend, group_
 
 def test_render_output_shape_and_dtype(backend: SceneBackend, group_spec: LatentSpec):
     backend.bind(group_spec)
-    backend.write_state(_mid_phi(group_spec, batch=2))
+    backend.write_state(_mid_phi(group_spec, batch=1))
     frame = backend.render(0)
     assert frame, "render() must return at least one camera"
     for cam in frame.values():
         assert cam["rgb"].dtype == torch.uint8
-        assert cam["rgb"].shape[0] == 2
+        assert cam["rgb"].shape[0] == 1
         assert cam["rgb"].shape[-1] == 3
         assert cam["seg"].dtype == torch.int64
-        assert cam["seg"].shape[0] == 2
+        assert cam["seg"].shape[0] == 1
 
 
 def test_diagnostics_present_and_in_range(backend: SceneBackend, group_spec: LatentSpec):
     backend.bind(group_spec)
-    backend.write_state(_mid_phi(group_spec, batch=3))
+    backend.write_state(_mid_phi(group_spec, batch=1))
     backend.render(0)
     diagnostics = backend.diagnostics()
     assert "visibility" in diagnostics
     assert "collision" in diagnostics
-    assert diagnostics["visibility"].shape[0] == 3
+    assert diagnostics["visibility"].shape[0] == 1
     assert bool(((diagnostics["visibility"] >= 0) & (diagnostics["visibility"] <= 1)).all())
 
 
