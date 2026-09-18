@@ -30,11 +30,22 @@ _BACKEND_FACTORIES: dict[str, Callable[[], SceneBackend]] = {
 
 
 @pytest.fixture(scope="session")
-def _simulation_app() -> Iterator[None]:
+def _simulation_app() -> None:
     """Boots `SimulationApp` once for the whole tier-2/tier-1-Isaac session
     (README §4.2, §10.3) -- a second `AppLauncher` in this process is not
     supported. Only ever requested from the ``isaac`` branch of ``backend``,
     which is itself deselected by default, so a local run never reaches this.
+
+    **Deliberately no teardown -- never calls `app.close()`.** Confirmed on
+    the pod twice: `SimulationApp.close()` can hard-terminate the process
+    without returning control to Python (a standalone boot diagnostic script
+    never printed its post-close line either). Doing that from a
+    session-fixture teardown means the process dies before pytest's own
+    terminal reporter gets to print anything -- every test result was
+    already recorded (a run of `E`s on screen), but the summary and failure
+    details never appeared because nothing survived long enough to print
+    them. The process exits right after this session ends regardless, so
+    there is nothing here that actually needs a clean close.
     """
     import argparse
 
@@ -45,9 +56,7 @@ def _simulation_app() -> Iterator[None]:
     parser = argparse.ArgumentParser()
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args(["--headless"])
-    app = launch(args)
-    yield app
-    app.close()
+    return launch(args)
 
 
 @pytest.fixture(scope="session")
