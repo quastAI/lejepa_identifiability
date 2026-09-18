@@ -416,15 +416,15 @@ separately (experiments E–I below), and it's a different kind of finding.**
 
 ---
 
-## Phase 3d — Spike 5, the missing knob: `table.roughness` / `table.albedo`
+## Phase 3d — Spike 5, the missing knob: `table.roughness` / `table.albedo` — resolved, one of two clean
 
 > Identified while scoping Phase 4's Isaac-facing backend (below): every
 > other README §5.2.3 `style` knob had a Round-1 or Round-2 verdict in §7.5
 > except these two, because no run of `spikes/spike_dynamic_attrs.py` ever
 > built a table prim at all — the knob wasn't blocked, it was never spiked.
-> **Written now, not run yet** — this is the pod-side gate the minimal
-> Isaac backend (Phase 4) needs an answer to before it can decide whether
-> `table.*` is included or refused at `bind()`.
+> **Result: `table.albedo` clean; `table.roughness` a second dead knob**, same
+> category as `light.azimuth_elevation` — not noise this time (bitwise-clean
+> everywhere), just genuinely zero pixel effect.
 
 - [x] 🤖 **Add a table prim + the same three-question recipe.** `build_rig()`
   now spawns `/World/Table` — a small flat `CuboidCfg` slab, offset beside the
@@ -449,19 +449,36 @@ separately (experiments E–I below), and it's a different kind of finding.**
     "Isaac layer" banner, same split as the rest of this file. 31/31 tests in
     that file, 176 collected / 174 passed / 2 skipped repo-wide, `ruff check`
     green locally as of 2026-09-18.
-- [ ] 🧑 **Run it on the pod, paste the table.** Same command as before —
-  `./isaaclab.sh -p spikes/spike_dynamic_attrs.py --out /idtb/data/spike_attrs`
-  — no new CLI flag, `table_roughness` and `table_albedo` just appear as two
-  more rows. Everything else in the table should reproduce exactly what §7.5
-  already reports; a change anywhere else would itself be a finding (the
-  table prim is new geometry in frame, so a widened noise floor or a shifted
-  `cube.*` number is possible and worth flagging, not assumed benign).
-- [ ] 🤖 **Fold the verdict into README §5.2.3/§7.5/§3.2 and into the Phase 4
-  Isaac backend's declared role list**, whichever way it comes back — clean
-  (both knobs join `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/
-  `cam.jitter`/`exposure` in the backend's supported set) or blocked (recorded
-  next to `light.azimuth_elevation` as a scoped, carried-forward item rather
-  than silently dropped).
+- [x] 🧑 **Run it on the pod, paste the table.** Took two runs, not one —
+  first run used the Round-1 config (`--reset-pt-accum-on-time-change` wasn't
+  passed), which correctly reproduced the *old*, already-diagnosed back-to-back
+  noise on `cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter` and made
+  it look like a regression. Confirmed from the run's own
+  `render_product_attribute_audit`: `"omni:rtx:scene:resetPtAccumOnAnimTimeChange": false`.
+  Second run with the flag: that attribute reads `true`, and every one of
+  those four is back to bitwise-clean — table addition confirmed *not* to
+  have disturbed anything already resolved (17 PASS / 3 FAIL: the two new
+  findings below, plus the unrelated always-expected `motion_blur` FAIL).
+- [x] 🤖 **Fold the verdict into README §5.2.3/§7.5/§3.1/§3.2/§11.** Done.
+  `table.albedo`: bitwise-deterministic (`order_independent_mad`/`back_to_back_mad`
+  both `0.0`) and responsive (`mad_vs_base = 0.00014`, nonzero — real but far
+  smaller than every other knob's, consistent with a small/off-centre table
+  patch in a 128×128 frame rather than a broken write). Joins
+  `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter`/`exposure`
+  in the Phase 4 Isaac backend's supported role set.
+  `table.roughness`: writes and reads back exactly (error `1.2e-8` against a
+  `1e-3` atol), fully bitwise-deterministic, but `states_distinguishable_mad`
+  is exactly `0.0` — varying it `0.5 → 0.95` changes no pixel at all. Leading
+  theory: no visible specular highlight lands on the table from this camera
+  angle in this scene (roughness only sharpens/blurs specular response;
+  nothing to sharpen if there's no highlight to begin with), not a write-path
+  bug — the write itself is proven exact. Recorded next to
+  `light.azimuth_elevation` as **blocked, carried forward**, not dropped: the
+  spike scene's flat lighting and this specific `PreviewSurfaceCfg` material
+  may simply not be the environment this knob needs, and scene v1 (real PBR
+  materials, HDRI dome, area lights, §7.4) is a materially different one.
+  Re-test both dead knobs together against scene v1's actual rig before
+  deciding either latent's fate for real.
 
 ---
 
@@ -511,6 +528,7 @@ pytest          # tier 0 + mock half green, zero collection errors
 Denoiser and accumulation behaviour is **scene-, material- and light-dependent**. The spike uses a shipped Franka + cuboid + default light; scene v1 adds PBR materials, HDRI, area lights, real resolution. The determinism verdict may not transfer and **N almost certainly won't** (it'll be larger). That's why the checks are written as reusable functions and N is recorded as a procedure. Re-gate on scene v1 before generating any dataset — next milestone, but the functions must exist now or it's a rewrite.
 
 - [ ] 🤖 **Specifically: re-test `light.azimuth_elevation` against scene v1's actual light rig before deciding its fate.** Phase 3c's investigation confirmed this latent is blocked on the spike scene's single `DistantLight` — its orientation has no measurable effect on the render under seven different render configurations, with a mathematically verified-exact write (README §7.5). It was **not dropped**: the effect could easily be specific to `UsdLux.DistantLight`'s code path, and scene v1 replaces this light entirely with an HDRI dome plus area lights (§7.4) — a different light type, plausibly a different route from "prim orientation" to "what the renderer shades with." Re-run the identical three-question recipe (`run_knob_check`, already written and reusable, same discipline as the rest of this file) against whatever attribute controls direction on the new rig — an area light's position/orientation, most likely — before including or excluding a direction-like `style` latent for scene v1. Do this before generating any dataset that would depend on the answer either way.
+- [ ] 🤖 **Same for `table.roughness` (Phase 3d).** Zero measurable pixel effect on this spike scene's flat `DistantLight` + plain `PreviewSurfaceCfg` table material — bitwise-clean write, bitwise-clean determinism, but `states_distinguishable_mad: 0.0`. Leading theory is the same shape as the light-direction one: nothing in this scene puts a visible specular highlight where the table sits, so roughness has nothing to sharpen or blur. Scene v1's real PBR materials and lighting (§7.4) may simply behave differently — re-test both dead knobs together against the real rig before excluding either as a `style` latent for real.
 
 ---
 
