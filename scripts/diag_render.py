@@ -1,14 +1,14 @@
 """Throwaway diagnostic for the base-group render-staleness bug (not part of
 the test suite or the public API) -- delete once the bug is resolved.
 
-Isolated cube+hue is dead (max=0.0) while arm+hue works (max=86). The
-cube's kinematic root-pose write is the culprit, not the arm -- matching
-IsaacLab PR #7587 ("shared kinematic rigid-object renderer contract"),
-which exists because kinematic RigidObjects need different renderer-sync
-handling than articulations. Testing whether writing hue *after* the
-cube's pose write + step() (instead of before, which is what
-write_latent_state() currently does) survives -- bypassing write_state()
-to control the exact order by hand.
+Any tensor-API cube pose write (write_root_pose_to_sim) permanently
+poisons the cube's material rendering for the rest of the session,
+regardless of write order relative to sim.step() -- confirmed by two
+separate tests. "arm+hue" (no cube tensor writes at all) works fine, so
+the fix under test here: write cube.x/cube.y as a pure USD translate
+Xform op on the cube prim instead, the same mechanism `cube.size`
+already uses reliably, bypassing the tensor API entirely for cube
+position.
 
 Run: /workspace/isaaclab/isaaclab.sh -p scripts/diag_render.py 2>&1 | grep -E "READ_|FRAME_"
 """
@@ -42,28 +42,45 @@ backend.bind(spec)
 rig = backend._rig
 
 
-def write_cube_pose_then_step(x: float, y: float) -> None:
-    root = rig.cube.data.default_root_state.clone()
-    root[:, 0] = x
-    root[:, 1] = y
-    root[:, 2] = rig.ground_z + 0.5 * rig.default_cube_edge_m
-    root[:, 0:3] += rig.scene.env_origins
-    root[:, 7:] = 0.0
-    rig.cube.write_root_pose_to_sim(root[:, :7])
-    rig.cube.write_root_velocity_to_sim(torch.zeros_like(root[:, 7:]))
-    rig.scene.write_data_to_sim()
-    rig.sim.step(render=False)
+def write_cube_xy_via_usd(x: float, y: float) -> None:
+    from pxr import Gf, UsdGeom
+
+    xformable = UsdGeom.Xformable(rig.cube_prim)
+    op = None
+    for existing in xformable.GetOrderedXformOps():
+        if existing.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            op = existing
+            break
+    if op is None:
+        op = xformable.AddTranslateOp()
+    z = rig.ground_z + 0.5 * rig.default_cube_edge_m
+    op.Set(Gf.Vec3d(x, y, z))
 
 
-write_cube_pose_then_step(0.0, 0.0)
+def read_cube_xy_via_usd() -> tuple[float, float]:
+    from pxr import UsdGeom
+
+    xformable = UsdGeom.Xformable(rig.cube_prim)
+    for op in xformable.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            v = op.Get()
+            return float(v[0]), float(v[1])
+    return 0.0, 0.0
+
+
+write_cube_xy_via_usd(0.0, 0.0)
 _write_hue(rig.cube_shader, 0.5)
+rig.sim.step(render=False)  # still needed for other groups' arm dims
 backend.render(0)
 frame_base = backend.render(1)["cam0"]["rgb"].clone()
+print("READ_base_xy", read_cube_xy_via_usd(), flush=True)
 
-write_cube_pose_then_step(0.0, 0.0)  # same pose again, matching a real sample
+write_cube_xy_via_usd(0.2285, 0.2285)
 _write_hue(rig.cube_shader, 0.8808)
+rig.sim.step(render=False)
 backend.render(0)
-frame_hue = backend.render(1)["cam0"]["rgb"].clone()
+frame_moved = backend.render(1)["cam0"]["rgb"].clone()
+print("READ_moved_xy", read_cube_xy_via_usd(), flush=True)
 
-d = (frame_hue.float() - frame_base.float()).abs()
+d = (frame_moved.float() - frame_base.float()).abs()
 print(f"FRAME_DIFF max={d.max().item():.4f} mean={d.mean().item():.6f}", flush=True)
