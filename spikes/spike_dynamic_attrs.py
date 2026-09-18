@@ -812,6 +812,34 @@ def write_light_direction(
     return direction
 
 
+def respawn_light_and_write_direction(
+    rig: Rig, *, azimuth_rad: float, elevation_rad: float
+) -> tuple[float, ...]:
+    """Destroy and recreate the light prim, then set its rotation on the fresh copy.
+
+    Experiment F (docs/PLAN.md Phase 3c, following up on §7.5's confirmed dead
+    knob): tests whether the zero-pixel-effect result under
+    `--reset-pt-accum-on-time-change`/`--extra-preset minimal` is a stale
+    acceleration structure or shadow cache keyed to the *prim's identity*
+    rather than its transform value -- a full respawn forces whatever
+    per-light structure the renderer builds to rebuild from scratch, which a
+    live `.Set()` on a long-lived prim does not. Deliberately expensive
+    (a full USD prim destroy+recreate every capture, not a cheap attribute
+    write) -- this is a diagnostic to localize the mechanism, not a candidate
+    for the real per-sample write path even if it turns out to work.
+    """
+    import isaaclab.sim as sim_utils
+
+    stage = rig.light_prim.GetStage()
+    stage.RemovePrim(rig.light_prim.GetPath())
+
+    light_cfg = sim_utils.DistantLightCfg(intensity=BASE_LIGHT_INTENSITY, color=(1.0, 1.0, 1.0))
+    light_cfg.func(LIGHT_PATH, light_cfg)
+    rig.light_prim = stage.GetPrimAtPath(LIGHT_PATH)
+
+    return write_light_direction(rig, azimuth_rad=azimuth_rad, elevation_rad=elevation_rad)
+
+
 def apply_carb_settings(values: Mapping[str, Any]) -> dict[str, Any]:
     """Set each carb key and read it back -- generalises ``spike_api.apply_preset``
     from a named, module-level preset to an arbitrary settings dict, for the
@@ -1032,6 +1060,16 @@ def main() -> int:
         "(a non-Fabric-tracked prim) goes fully unresponsive under --extra-preset minimal "
         "and --reset-pt-accum-on-time-change while light.intensity/warmth do not.",
     )
+    parser.add_argument(
+        "--respawn-light-for-direction",
+        action="store_true",
+        help="docs/PLAN.md Phase 3c experiment F: for the light_direction check only, "
+        "destroy and recreate the light prim before writing its rotation on the fresh "
+        "copy, instead of mutating the existing prim's xform op in place -- tests whether "
+        "the confirmed zero-pixel-effect result (README §7.5) is a stale per-light "
+        "acceleration structure/shadow cache keyed to prim identity, not the transform "
+        "value. Diagnostic only: expensive, not a candidate for the real write path.",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
 
@@ -1242,9 +1280,18 @@ def main() -> int:
             current = need_rig()
 
             def write_direction(azimuth_elevation: tuple[float, float]) -> None:
-                write_light_direction(
-                    current, azimuth_rad=azimuth_elevation[0], elevation_rad=azimuth_elevation[1]
-                )
+                if getattr(args, "respawn_light_for_direction", False):
+                    respawn_light_and_write_direction(
+                        current,
+                        azimuth_rad=azimuth_elevation[0],
+                        elevation_rad=azimuth_elevation[1],
+                    )
+                else:
+                    write_light_direction(
+                        current,
+                        azimuth_rad=azimuth_elevation[0],
+                        elevation_rad=azimuth_elevation[1],
+                    )
 
             return run_knob_check(
                 current,
