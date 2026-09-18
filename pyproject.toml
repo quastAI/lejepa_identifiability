@@ -10,7 +10,7 @@ description = "Isaac Sim identifiability testbed: OU-sampled pairs with known Ga
 # `requires_python == 3.12.*`. Deliberately a floor and not an equality: the pure
 # tier-0 layers have to stay runnable on whatever local interpreter is to hand.
 requires-python = ">=3.12"
-dependencies = ["torch"]
+dependencies = ["torch", "numpy"]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]

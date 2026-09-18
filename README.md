@@ -60,7 +60,8 @@ The purpose of this section is to keep the plan honest about the difference betw
 | **Accumulation depth N is the `totalSpp` carb setting, not a `sim.render()` loop count** | §7.2 Spike 3. Under `standard`'s settings, every depth from 1 to 64 external render calls read back bitwise identical — the renderer's own accumulation completes inside one call once `totalSpp` is set. One render call per capture suffices; re-measure on scene v1 per §7.4's closing note, since N almost certainly changes with scene complexity even though the *mechanism* (it's `totalSpp`, not a loop) will not. |
 | **`TiledCamera` is safe to use** | §7.2 Spike 4. Identical frame statistics to `Camera`, and correctly distinguishes two envs holding different states — no sign of [IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)'s tile corruption on this build. Worth the throughput win with no observed downside. |
 | **Isaac's camera sensor output is an aliased, reused buffer — always `.clone()` immediately** | §7.2 Spike 1 (unplanned finding). `camera.data.output[...]` returns the same underlying tensor across calls, on every render mode tried; a caller that doesn't clone before the next capture silently observes the wrong frame. Permanent constraint on `writer.py`/`generate.py`, not a settings choice. |
-| The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. |
+| The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. **Built, Phase 4** — `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`. |
+| **An Isaac-facing `SceneBackend` is not built yet, deliberately** | Phase 4 (docs/PLAN.md). Every role either needs a spike-verified write path or gets refused at `bind()` via `UnsupportedRoleError` — `table.roughness`/`table.albedo` were never spiked at all, and `light.azimuth`/`light.elevation` is confirmed blocked (§7.5). Building the "obvious" version now would mean guessing on both, which the project has refused to do since Phase 3. §7.4's known-limit note already predicts this backend gets rewritten once scene v1 replaces the spike scene's `DistantLight` — a further reason not to build it ahead of that need. The tier-1 contract suite (`tests/contract/`) is written to take a second backend with no rewrite once one exists. |
 | Tests accompany every module; the §10.1 correctness gates are executable tests | §10.3. |
 | One installable package `src/idtb/`, never top-level `sim`/`gen`/`eval` | Those names collide with Kit extensions on Isaac's `sys.path`, and `eval` shadows a builtin. §4.6. |
 | Handles are keyed by **role** (`arm.j0`, `cube.x`), not by Franka joint name | §6.2. A spec keyed on asset-specific names cannot be shared with the mock, which makes the tier-1 contract suite impossible. |
@@ -172,11 +173,12 @@ Two architectural properties matter:
 
 ### 4.3 The backend seam
 
-Defined in `src/idtb/sim/backend.py` — pure Python, zero Isaac imports:
+Defined in `src/idtb/sim/backend.py` — pure Python, zero Isaac imports, **built in Phase 4**:
 
 ```python
 class SceneBackend(Protocol):
-    def handles(self) -> Mapping[str, HandleInfo]: ...
+    def bind(self, spec: LatentSpec) -> None:           ...  # resolve roles; raises UnsupportedRoleError
+    def handles(self) -> Mapping[str, HandleInfo]: ...       # role -> which write path carries it
     def write_state(self, phi: Tensor) -> None:        ...  # [B, n], teleport
     def read_state(self) -> Tensor:                    ...  # [B, n], for the read-back gate
     def render(self, sample_idx: int) -> dict:         ...  # {cam_id: {"rgb":…, "seg":…}}
@@ -184,13 +186,13 @@ class SceneBackend(Protocol):
     def close(self) -> None:                           ...
 ```
 
-- **`IsaacSceneBackend`** — real, lazy-imports Isaac, runs remotely.
-- **`MockSceneBackend`** — an analytic toy renderer (project handles to 2D, draw sprites). Deterministic and injective *by construction*.
+- **`MockSceneBackend`** (`src/idtb/sim/mock.py`, **built**) — an analytic numpy renderer: anti-aliased sprites for the cube (position/size/hue) and a joint-driven arm marker, plus a global style tone (light, camera jitter, table, exposure). Deterministic and injective *by construction*, no RNG anywhere.
+- **An Isaac-facing backend** — real, lazy-imports Isaac, runs remotely. **Not built yet, deliberately** (§3.1, docs/PLAN.md Phase 4): `bind()` exists precisely so a backend can declare partial support and fail loudly on the rest, but every currently-unverified or blocked `full`/`style` write path (`table.*`, `light.azimuth`/`light.elevation`) would have to be faked or omitted to build one today, and §7.4 already predicts this backend gets rewritten once scene v1 replaces the spike scene's light rig.
 
 The mock is not a convenience. It does two jobs:
 
 1. It gives a local development and test loop for the OU sampler, the squash, the shard writer, the generation driver, the metrics and the LeJEPA training code — which is most of the project.
-2. It gives the correctness gates a **known-good reference**. A determinism gate that has never been observed to pass on something that should pass is not evidence. Running the same contract suite against the mock (must pass) and against Isaac (must also pass) is what makes the Isaac result meaningful.
+2. It gives the correctness gates a **known-good reference**. A determinism gate that has never been observed to pass on something that should pass is not evidence. Running the same contract suite (`tests/contract/`) against the mock (must pass) and against Isaac (must also pass, once that backend exists) is what makes the Isaac result meaningful.
 
 ### 4.4 The Isaac API surface we actually need
 
@@ -259,8 +261,10 @@ lejepa_identifiability/
 │   ├── latents/                     # pure python, no Isaac          ✅ built
 │   │   ├── spec.py                  # Handle, LatentSpec: roles, squash φ
 │   │   └── ou.py                    # OU pair sampler
-│   ├── sim/                         # backend.py (protocol) · mock.py · app.py
-│   │                                # scene.py · writer.py · render.py
+│   ├── sim/                         # backend.py (protocol) ✅ · mock.py ✅
+│   │                                # app.py · scene.py · writer.py · render.py
+│   │                                # — an Isaac-facing backend, not built (§4.3)
+│   ├── gates.py                     # §10.1 pipeline-correctness gates ✅ built
 │   ├── gen/                         # generate.py — dataset driver, sharded
 │   └── analysis/                    # LeJEPA training · metrics
 ├── spikes/
@@ -269,10 +273,13 @@ lejepa_identifiability/
 ├── tests/
 │   ├── test_ou.py, test_spec.py     # tier 0 — pure                  ✅ built
 │   ├── test_import_guard.py         # tier 0 — §4.2 enforced         ✅ built
+│   ├── test_mock.py                 # tier 0 — MockSceneBackend contract ✅ built
+│   ├── test_gates.py                # tier 0 — gates + negative controls ✅ built
 │   ├── test_spike_api.py            # tier 0 — the spike's detectors    ✅ built
 │   │                                # + negative controls that fire
 │   ├── test_spike_dynamic_attrs.py  # tier 0 — resolve()/hue/azel/aperture ✅ built
-│   ├── contract/                    # tier 1 — parametrized over backend
+│   ├── contract/                    # tier 1 — parametrized over backend ✅ built
+│   │                                # (mock only; Isaac backend pending)
 │   └── isaac/                       # tier 2 — pod only
 ├── scenes/                          # stage_v1_tabletop.usd, materials/
 ├── configs/                         # ρ, λ, n, render preset
@@ -1108,15 +1115,24 @@ One deliberate re-ordering against an earlier draft: **the `SceneBackend` protoc
 
 ### 10.1 Pipeline-correctness gates
 
-Each must pass before the next phase is trusted:
+Each must pass before the next phase is trusted. **`determinism_gate`, `read_back_gate`
+and `style_sensitivity_gate` are library code, `src/idtb/gates.py`** (docs/PLAN.md
+Phase 4) — the tests below and `generate.py`, once it exists, call the same
+functions, so a gate cannot be skipped just because nobody ran `pytest`.
 
-- **Sampler:** Cov(z) ≈ I, Cov(z, z′) ≈ ρI, per-dim normality tests pass.
-- **Writer:** state read back from the sim matches what was written, to solver tolerance, for every handle. Non-negotiable — see the §6.3 warning.
-- **Renderer:** order-independence test of §7.1 passes.
-- **Injectivity proxy:** nearest-neighbour check — the fraction of image pairs whose pixel distance is near zero while their latent distance is large should be negligible. A non-trivial fraction means *g* is not injective and there is an occlusion or symmetry problem to fix *before* blaming the encoder.
-- **Style sensitivity:** varying a `style` dimension alone must move pixels far above the render noise floor, per knob (§7.5). A style knob that is silently disconnected hands the encoder perfect invariance for free, and the headline invariance result is then an artefact of an unchecked write. This gate is why §7.5 ranks sensitivity above determinism.
-- **Group wiring:** `Cov(z, z′)` measured on real generated shards must be ρ_task on the task block and **exactly zero** on the style block. Cheap, and the only direct evidence that ρ = 0 reached the dimensions it was meant to.
-- **Trivial-baseline check:** a linear probe from raw pixels to *z* should score poorly (confirming the mixing is genuinely nonlinear, analogous to the paper's *R²*(x→z) ≈ 0.73–0.78 column). If raw pixels already predict *z* linearly, the task is too easy to be informative.
+- **Sampler:** Cov(z) ≈ I, Cov(z, z′) ≈ ρI, per-dim normality tests pass. (`tests/test_ou.py`.)
+- **Writer:** state read back from the sim matches what was written, to solver tolerance, for every handle. Non-negotiable — see the §6.3 warning. `gates.read_back_gate`, raises `GateFailed` with the max error and its worst dimension.
+- **Renderer:** order-independence test of §7.1 passes. `gates.determinism_gate` — also catches an aliased sensor buffer (§7.2), since that is otherwise indistinguishable from a genuinely reproducible render.
+- **Injectivity proxy:** nearest-neighbour check — the fraction of image pairs whose pixel distance is near zero while their latent distance is large should be negligible. A non-trivial fraction means *g* is not injective and there is an occlusion or symmetry problem to fix *before* blaming the encoder. A lightweight two-state version of this runs in `tests/contract/`; the full nearest-neighbour statistic over many samples is a Phase 5+ analysis-layer measurement.
+- **Style sensitivity:** varying a `style` dimension alone must move pixels far above the render noise floor, per knob (§7.5). A style knob that is silently disconnected hands the encoder perfect invariance for free, and the headline invariance result is then an artefact of an unchecked write. This gate is why §7.5 ranks sensitivity above determinism. `gates.style_sensitivity_gate`.
+- **Group wiring:** `Cov(z, z′)` measured on real generated shards must be ρ_task on the task block and **exactly zero** on the style block. Cheap, and the only direct evidence that ρ = 0 reached the dimensions it was meant to. Covered at the sampler level by Phase 3a's tier-0 test; re-run on real generated shards once `generate.py` exists.
+- **Trivial-baseline check:** a linear probe from raw pixels to *z* should score poorly (confirming the mixing is genuinely nonlinear, analogous to the paper's *R²*(x→z) ≈ 0.73–0.78 column). If raw pixels already predict *z* linearly, the task is too easy to be informative. Analysis-layer, Phase 5+.
+
+Negative controls for the three gates above (fault-injecting `MockSceneBackend`
+subclasses — free-running noise, a temporal leak, an aliased buffer, a frozen
+write, a disconnected style knob) live in `tests/test_gates.py`: a gate that
+has only ever been seen to pass is not a gate, it is a detector nobody has
+watched detect anything.
 
 ### 10.2 Scientific measurements
 
@@ -1136,15 +1152,15 @@ Tests accompany every module. The tiering exists because of the platform constra
 
 | Tier | Runs on | Contents |
 |---|---|---|
-| **0 — pure** | laptop, plain `pytest` | OU sampler statistics, squash monotonicity and injectivity, `LatentSpec` handle bookkeeping, shard writer round-trip, metrics against synthetic ground truth |
-| **1 — contract** | laptop (mock) **and** pod (Isaac), one suite parametrized over backend | write → read-back fidelity; render determinism and order-independence (§7.1); output shapes and dtypes; injectivity proxy; diagnostics present and in range |
+| **0 — pure** | laptop, plain `pytest` | OU sampler statistics, squash monotonicity and injectivity, `LatentSpec` handle bookkeeping, `MockSceneBackend` contract (`test_mock.py`), gates + negative controls (`test_gates.py`), shard writer round-trip, metrics against synthetic ground truth |
+| **1 — contract** | laptop (mock) **and** pod (Isaac), one suite parametrized over backend | **Built, `tests/contract/`, Phase 4.** Write → read-back fidelity; render determinism and order-independence (§7.1); output shapes and dtypes; injectivity proxy; diagnostics present and in range; style sensitivity — each parametrized over `base`/`base+style`/`full`/`full+style` too. Only `MockSceneBackend` is registered today; an Isaac-facing backend is the one piece of Phase 4 not yet built (§4.3, §3.1) — adding it is a one-line change to `tests/contract/conftest.py`, by design. |
 | **2 — Isaac only** | pod, under Isaac's interpreter | asset loading, joint-name resolution against the real Franka, annotator availability, convergence-to-fixed-point of the chosen preset |
 
 Mechanics:
 
 - Tier 2 and the Isaac half of tier 1 are marked `@pytest.mark.isaac` and deselected by default.
 - A **session-scoped fixture** owns the single `SimulationApp` (§4.2); tests must not attempt to create a second.
-- **No hosted CI.** The suite is run by hand — locally before a commit, and on the pod for the Isaac tiers. The §10.1 gates therefore live in `src/` and are called by `generate.py`, so a gate cannot be skipped just because nobody ran `pytest`; the tests and the generator call the same function.
+- **No hosted CI.** The suite is run by hand — locally before a commit, and on the pod for the Isaac tiers. The §10.1 gates therefore live in `src/idtb/gates.py` and are meant to be called by `generate.py` too, once that driver exists, so a gate cannot be skipped just because nobody ran `pytest`; the tests and the generator call the same function.
 - Tier 1 is the payoff of the seam: the §10.1 gates become executable contracts that the mock **must pass** and the Isaac backend **must also pass**. A gate only observed against one implementation is weak evidence.
 
 ---
@@ -1200,7 +1216,7 @@ Two tracks, and they are independent.
 1. ~~OU sampler, `LatentSpec`, squash — with tier-0 tests.~~ **Done.** Plus the package scaffolding, the §4.2 import guard as an executable test, and the two pod scripts Track A needs.
 2. ~~`spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast.~~ **Written, run four times, answered (§7.2).**
 3. ~~`spikes/spike_dynamic_attrs.py` — Spike 5, the `full`/`style` attribute write paths.~~ **Done** (docs/PLAN.md Phase 3b/3c). Reuses `spike_api.py`'s pure layer rather than duplicating it; its own new pure helpers (`try_candidates`, `hue_to_rgb`, `azel_to_direction`, `cube_size_radius_from_aperture`) are covered by `tests/test_spike_dynamic_attrs.py`. Resolved everything except `light.azimuth_elevation` (§7.5).
-4. Then, against what both spikes measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.
+4. ~~Then, against what both spikes measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.~~ **Done, 2026-09-18** (docs/PLAN.md Phase 4). `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`, `src/idtb/gates.py`, `tests/test_mock.py`, `tests/test_gates.py` (negative controls), `tests/contract/` (parametrized over group config; only the mock backend registered). **Not built:** an Isaac-facing `SceneBackend` — every unverified or blocked `full`/`style` write path would have to be guessed at, which the project has refused to do since Phase 3; see the new §3.1 row and docs/PLAN.md Phase 4's last two items.
 
 > ### Closing note on sequencing
 >
