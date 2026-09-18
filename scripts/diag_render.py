@@ -10,18 +10,16 @@ Run: /workspace/isaaclab/isaaclab.sh -p scripts/diag_render.py 2>&1 | grep -E "R
 """
 
 import argparse
-import sys
 
 import torch
 from isaaclab.app import AppLauncher
 
+from idtb.sim.app import launch
+
 parser = argparse.ArgumentParser()
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args(["--headless"])
-saved_argv = sys.argv
-sys.argv = saved_argv[:1]
-app = AppLauncher(args).app
-sys.argv = saved_argv
+app = launch(args)
 
 from idtb.latents import Handle, LatentSpec  # noqa: E402
 from idtb.sim.scene import IsaacSceneBackend  # noqa: E402
