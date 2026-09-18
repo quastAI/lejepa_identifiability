@@ -11,8 +11,10 @@ are natively batched by Isaac Lab, but batching the attribute paths
 never been spiked -- each currently writes to one shared prim, not one per
 env -- so this is a documented, honest limit, not a silent assumption.
 
-Written blind against :class:`idtb.sim.scene.Rig`, like every other
-Isaac-facing module in this project -- verified on the pod, not here.
+Verified on the pod against :class:`idtb.sim.scene.Rig`, not here (this
+repo has no Isaac runtime) -- see `write_latent_state`'s and
+`_write_cube_position`'s docstrings for the two real defects that
+composition found beyond what the spikes verified in isolation.
 """
 
 from __future__ import annotations

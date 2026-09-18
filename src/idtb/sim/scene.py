@@ -1,16 +1,11 @@
 """Builds the scene and implements `SceneBackend` against it (README §4.3).
 
-**Written blind, like every spike before it — not yet run on the pod.**
-Every individual API call here was verified in isolation: the Franka +
-cube + camera rig and its joint/root-state writes by Spike 1/2
-(`spikes/spike_api.py`, §7.2), the cube/light/table attribute writes and
-per-capture camera re-aim by Spike 5 (`spikes/spike_dynamic_attrs.py`,
-§7.5). Combining all of them into one scene — a Franka arm *and* a
-material-writable cube *and* a table *and* per-capture camera jitter, all
-at once — has never been run together. That composition is the thing a
-pod session against this module needs to confirm, the same way Spike 1's
-first pod run found two defects in code that looked correct on paper
-(docs/PLAN.md Phase 3).
+Combining the Franka + cube + camera rig with every attribute write in one
+scene, all at once, found two real defects on the pod beyond what Spikes
+1/2/5 verified in isolation (docs/PLAN.md Phase 4's third/fourth pod runs:
+a `FabricFrameView` prim-path gap for the table, and a `SimulationApp`
+session-scope/teardown issue) plus one deeper one `writer.py`'s docstring
+covers (the fifth pod run's render-staleness finding).
 
 Only the roles Spikes 1–5 actually verified are wired up: `light.azimuth`,
 `light.elevation` and `table.roughness` are confirmed **blocked** (README
