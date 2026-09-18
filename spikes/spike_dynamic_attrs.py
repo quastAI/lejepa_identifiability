@@ -355,6 +355,22 @@ EXTRA_PRESETS: dict[str, dict[str, Any]] = {
 # policy (README §5.5) never produces.
 RESET_ACCUM_ON_TIME_CHANGE: dict[str, Any] = {"/rtx/resetPtAccumOnAnimTimeChange": True}
 
+# Experiment E (added after C1/D2 both independently produced the identical
+# dead-knob signature for light.azimuth_elevation -- order-independent AND
+# back-to-back mad both exactly 0.0, while light.intensity/warmth on the same
+# prim stayed fully responsive under the same two configs). The light's
+# rotation is a raw, non-Fabric-tracked USD xform op -- only the kinematic
+# cube is Fabric-published (docs/answer.md's own diagnosis of the TypeScale-
+# vs-TypeRotateXYZ split, README §7.5). This is the exact warning printed on
+# every single boot, flagged as "the single best lead" in the original
+# research task and never tested until now: a renderer path that prefers
+# Fabric-published transforms may simply never see this prim's update at all
+# under `resetPtAccumOnAnimTimeChange`/`minimal`'s faster code paths, freezing
+# the light's rotation at scene-build time rather than under-converging it.
+DISABLE_FABRIC_TRANSFORM_SYNC: dict[str, Any] = {
+    "/rtx/hydra/readTransformsFromFabricInRenderDelegate": False
+}
+
 
 @dataclass
 class Rig:
@@ -474,6 +490,9 @@ def build_rig(args: argparse.Namespace) -> Rig:
 
     if getattr(args, "reset_pt_accum_on_time_change", False):
         notes["reset_pt_accum_on_time_change"] = apply_carb_settings(RESET_ACCUM_ON_TIME_CHANGE)
+
+    if getattr(args, "disable_fabric_transform_sync", False):
+        notes["disable_fabric_transform_sync"] = apply_carb_settings(DISABLE_FABRIC_TRANSFORM_SYNC)
 
     if getattr(args, "reset_cadence_per_capture", False):
         cadence_desc, cadence_fn = resolve_cadence_reset(sim)
@@ -1003,6 +1022,15 @@ def main() -> int:
         default="sim_render",
         help="docs/PLAN.md Phase 3c experiment C: swap the capture loop's render tick "
         "from sim.render() (default) to omni.kit.app.get_app().update().",
+    )
+    parser.add_argument(
+        "--disable-fabric-transform-sync",
+        action="store_true",
+        help="docs/PLAN.md Phase 3c experiment E: set "
+        "/rtx/hydra/readTransformsFromFabricInRenderDelegate=False once at scene build -- "
+        "tests whether a Fabric-preferring transform path is why light.azimuth_elevation "
+        "(a non-Fabric-tracked prim) goes fully unresponsive under --extra-preset minimal "
+        "and --reset-pt-accum-on-time-change while light.intensity/warmth do not.",
     )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()

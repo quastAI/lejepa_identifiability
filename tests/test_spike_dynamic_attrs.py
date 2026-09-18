@@ -294,6 +294,12 @@ def test_reset_accum_on_time_change_is_a_single_bool_key():
     assert spike.RESET_ACCUM_ON_TIME_CHANGE == {"/rtx/resetPtAccumOnAnimTimeChange": True}
 
 
+def test_disable_fabric_transform_sync_is_a_single_bool_key():
+    assert spike.DISABLE_FABRIC_TRANSFORM_SYNC == {
+        "/rtx/hydra/readTransformsFromFabricInRenderDelegate": False
+    }
+
+
 # --- resolve_cadence_reset: IsaacLab#6609's cadence-invalidation lookup ---------
 
 
