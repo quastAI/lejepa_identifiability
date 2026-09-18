@@ -301,10 +301,20 @@ class IsaacSceneBackend:
         return read_latent_state(self._rig, self._require_bound())
 
     def render(self, sample_idx: int) -> dict[str, dict[str, Tensor]]:
-        del sample_idx
+        """Confirmed flaky on the pod without the discarded settle render
+        below: a sensitivity check that chains many captures in one test
+        would intermittently find one attribute dead -- a *different* one
+        each rerun, on identical code -- while a lone one-shot capture
+        (e.g. determinism's A/B pair) reliably didn't. Matches
+        `spikes/spike_api.py`'s own documented history of exactly this
+        ("a full render-mode switch needing a discarded settle render...
+        flaky, not deterministic"). Doubles every render's cost; the right
+        place to pay it is here, once, rather than in every caller."""
         self._require_bound()
         self._rig.camera.update(dt=0.0, force_recompute=True)
         self._rig.sim.render()
+        self._rig.camera.update(dt=0.0, force_recompute=True)
+        self._rig.sim.render()  # discarded settle render (see docstring)
         self._rig.camera.update(dt=0.0, force_recompute=True)
         rgb = self._rig.camera.data.output["rgb"].clone()
         seg = self._rig.camera.data.output["semantic_segmentation"].clone()
