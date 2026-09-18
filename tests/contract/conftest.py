@@ -1,14 +1,19 @@
 """Backend factories for the tier-1 contract suite (README §10.3).
 
 Every test in this package is written as a function of ``backend`` so a
-future Isaac-backed :class:`idtb.sim.backend.SceneBackend` costs one entry in
-``_BACKEND_FACTORIES``, not a rewrite of the suite -- the whole point of the
-seam (README §4.3). Only :class:`idtb.sim.mock.MockSceneBackend` exists today:
-docs/PLAN.md Phase 4 scoped an Isaac-facing backend out, since it would have
-to either fake write paths for `style` knobs no spike has verified
-(`table.roughness`/`table.albedo`) or one that is confirmed blocked
-(`light.azimuth`/`light.elevation`, README §7.5) -- exactly the "resolve,
-don't guess" discipline the spikes were written under.
+second :class:`idtb.sim.backend.SceneBackend` costs one entry here, not a
+rewrite of the suite -- the whole point of the seam (README §4.3).
+
+``IsaacSceneBackend`` is registered behind ``@pytest.mark.isaac`` (deselected
+by default, per ``pyproject.toml``'s ``-m "not isaac"``): it needs a real
+``SimulationApp`` booted first (README §4.2), which only happens under
+Isaac's own interpreter on the pod, and it is **written but not yet run**
+(docs/PLAN.md Phase 4) -- combining a Franka arm with every verified
+attribute write in one scene has never been exercised end to end before.
+`light.azimuth`/`light.elevation` and `table.roughness` stay unregistered
+anywhere: they are confirmed blocked (README §7.5, §11), not merely unbuilt,
+so ``group_spec``'s ``base+style``/``full+style`` configurations only ever
+exercise roles this backend actually declares support for.
 """
 
 from __future__ import annotations
@@ -24,8 +29,42 @@ _BACKEND_FACTORIES: dict[str, Callable[[], SceneBackend]] = {
 }
 
 
-@pytest.fixture(params=list(_BACKEND_FACTORIES))
+@pytest.fixture(scope="session")
+def _simulation_app() -> Iterator[None]:
+    """Boots `SimulationApp` once for the whole tier-2/tier-1-Isaac session
+    (README §4.2, §10.3) -- a second `AppLauncher` in this process is not
+    supported. Only ever requested from the ``isaac`` branch of ``backend``,
+    which is itself deselected by default, so a local run never reaches this.
+    """
+    import argparse
+
+    from isaaclab.app import AppLauncher
+
+    from idtb.sim.app import launch
+
+    parser = argparse.ArgumentParser()
+    AppLauncher.add_app_launcher_args(parser)
+    args = parser.parse_args(["--headless"])
+    app = launch(args)
+    yield app
+    app.close()
+
+
+@pytest.fixture(
+    params=[
+        "mock",
+        pytest.param("isaac", marks=pytest.mark.isaac),
+    ]
+)
 def backend(request: pytest.FixtureRequest) -> Iterator[SceneBackend]:
-    made = _BACKEND_FACTORIES[request.param]()
+    if request.param == "mock":
+        made: SceneBackend = MockSceneBackend()
+    else:
+        # Lazily pulls in `_simulation_app` only for this branch, so a local
+        # `pytest` run (which deselects `isaac`) never has to boot Isaac.
+        request.getfixturevalue("_simulation_app")
+        from idtb.sim import IsaacSceneBackend
+
+        made = IsaacSceneBackend()
     yield made
     made.close()

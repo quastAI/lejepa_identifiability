@@ -8,9 +8,11 @@ ruff's TID253.
 
 from idtb.sim.backend import HandleInfo, SceneBackend, UnsupportedRoleError, WritePath
 from idtb.sim.mock import MockSceneBackend
+from idtb.sim.scene import IsaacSceneBackend
 
 __all__ = [
     "HandleInfo",
+    "IsaacSceneBackend",
     "MockSceneBackend",
     "SceneBackend",
     "UnsupportedRoleError",

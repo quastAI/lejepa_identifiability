@@ -61,7 +61,7 @@ The purpose of this section is to keep the plan honest about the difference betw
 | **`TiledCamera` is safe to use** | §7.2 Spike 4. Identical frame statistics to `Camera`, and correctly distinguishes two envs holding different states — no sign of [IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)'s tile corruption on this build. Worth the throughput win with no observed downside. |
 | **Isaac's camera sensor output is an aliased, reused buffer — always `.clone()` immediately** | §7.2 Spike 1 (unplanned finding). `camera.data.output[...]` returns the same underlying tensor across calls, on every render mode tried; a caller that doesn't clone before the next capture silently observes the wrong frame. Permanent constraint on `writer.py`/`generate.py`, not a settings choice. |
 | The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. **Built, Phase 4** — `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`. |
-| **An Isaac-facing `SceneBackend` is not built yet, deliberately** | Phase 4 (docs/PLAN.md). Every role either needs a spike-verified write path or gets refused at `bind()` via `UnsupportedRoleError` — `light.azimuth`/`light.elevation` and, as of Phase 3d, `table.roughness` too are confirmed blocked: writable, exact, bitwise-deterministic, but zero measurable pixel effect (§7.5). `table.albedo` is spiked clean and joins the supported set. Building an Isaac backend that declared the two blocked roles anyway would be exactly the guessing the project has refused to do since Phase 3. §7.4's known-limit note already predicts this backend gets rewritten once scene v1 replaces the spike scene's `DistantLight` and `PreviewSurfaceCfg` material — a further reason not to build it ahead of that need. The tier-1 contract suite (`tests/contract/`) is written to take a second backend with no rewrite once one exists. |
+| **`IsaacSceneBackend` is built, not yet run on the pod** | Phase 4 (docs/PLAN.md), built once Phase 3d's table verdict landed. `src/idtb/sim/{app,render,writer,scene}.py`. Declares support for exactly what §7.2/§7.5 confirmed — `base`, `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter`, `exposure`, `table.albedo` — and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError`, since all three are confirmed **blocked**: writable, exact, bitwise-deterministic, but zero measurable pixel effect (§7.5). Written blind like every other Isaac-facing file in this project: every individual API call was verified in isolation, but combining a Franka arm with every attribute write in one scene has never been run together. Registered behind `@pytest.mark.isaac` in the tier-1 contract suite (`tests/contract/`), deselected by default. |
 | Tests accompany every module; the §10.1 correctness gates are executable tests | §10.3. |
 | One installable package `src/idtb/`, never top-level `sim`/`gen`/`eval` | Those names collide with Kit extensions on Isaac's `sys.path`, and `eval` shadows a builtin. §4.6. |
 | Handles are keyed by **role** (`arm.j0`, `cube.x`), not by Franka joint name | §6.2. A spec keyed on asset-specific names cannot be shared with the mock, which makes the tier-1 contract suite impossible. |
@@ -188,7 +188,7 @@ class SceneBackend(Protocol):
 ```
 
 - **`MockSceneBackend`** (`src/idtb/sim/mock.py`, **built**) — an analytic numpy renderer: anti-aliased sprites for the cube (position/size/hue) and a joint-driven arm marker, plus a global style tone (light, camera jitter, table, exposure). Deterministic and injective *by construction*, no RNG anywhere.
-- **An Isaac-facing backend** — real, lazy-imports Isaac, runs remotely. **Not built yet, deliberately** (§3.1, docs/PLAN.md Phase 4): `bind()` exists precisely so a backend can declare partial support and fail loudly on the rest, but every currently-unverified or blocked `full`/`style` write path (`table.*` — spiked, docs/PLAN.md Phase 3d, verdict pending a pod run; `light.azimuth`/`light.elevation` — confirmed blocked, §7.5) would have to be faked or omitted to build one today, and §7.4 already predicts this backend gets rewritten once scene v1 replaces the spike scene's light rig.
+- **`IsaacSceneBackend`** (`src/idtb/sim/scene.py`, plus `app.py`/`render.py`/`writer.py`) — real, lazy-imports Isaac, runs remotely. **Built (§3.1, docs/PLAN.md Phase 4), not yet run on the pod.** `bind()` declares support for exactly the roles §7.2/§7.5 confirmed and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError` — all three are confirmed **blocked**, not merely unverified. §7.4 already predicts this backend gets rewritten once scene v1 replaces the spike scene's light rig and table material.
 
 The mock is not a convenience. It does two jobs:
 
@@ -263,8 +263,9 @@ lejepa_identifiability/
 │   │   ├── spec.py                  # Handle, LatentSpec: roles, squash φ
 │   │   └── ou.py                    # OU pair sampler
 │   ├── sim/                         # backend.py (protocol) ✅ · mock.py ✅
-│   │                                # app.py · scene.py · writer.py · render.py
-│   │                                # — an Isaac-facing backend, not built (§4.3)
+│   │                                # app.py ✅ · scene.py ✅ · writer.py ✅
+│   │                                # · render.py ✅ — IsaacSceneBackend
+│   │                                # built, not yet run on the pod (§4.3)
 │   ├── gates.py                     # §10.1 pipeline-correctness gates ✅ built
 │   ├── gen/                         # generate.py — dataset driver, sharded
 │   └── analysis/                    # LeJEPA training · metrics
@@ -276,11 +277,13 @@ lejepa_identifiability/
 │   ├── test_import_guard.py         # tier 0 — §4.2 enforced         ✅ built
 │   ├── test_mock.py                 # tier 0 — MockSceneBackend contract ✅ built
 │   ├── test_gates.py                # tier 0 — gates + negative controls ✅ built
+│   ├── test_writer.py               # tier 0 — writer.py's pure helpers ✅ built
 │   ├── test_spike_api.py            # tier 0 — the spike's detectors    ✅ built
 │   │                                # + negative controls that fire
 │   ├── test_spike_dynamic_attrs.py  # tier 0 — resolve()/hue/azel/aperture ✅ built
 │   ├── contract/                    # tier 1 — parametrized over backend ✅ built
-│   │                                # (mock only; Isaac backend pending)
+│   │                                # mock + isaac (isaac deselected by
+│   │                                # default; not yet run on the pod)
 │   └── isaac/                       # tier 2 — pod only
 ├── scenes/                          # stage_v1_tabletop.usd, materials/
 ├── configs/                         # ρ, λ, n, render preset
@@ -1192,7 +1195,7 @@ Tests accompany every module. The tiering exists because of the platform constra
 | Tier | Runs on | Contents |
 |---|---|---|
 | **0 — pure** | laptop, plain `pytest` | OU sampler statistics, squash monotonicity and injectivity, `LatentSpec` handle bookkeeping, `MockSceneBackend` contract (`test_mock.py`), gates + negative controls (`test_gates.py`), shard writer round-trip, metrics against synthetic ground truth |
-| **1 — contract** | laptop (mock) **and** pod (Isaac), one suite parametrized over backend | **Built, `tests/contract/`, Phase 4.** Write → read-back fidelity; render determinism and order-independence (§7.1); output shapes and dtypes; injectivity proxy; diagnostics present and in range; style sensitivity — each parametrized over `base`/`base+style`/`full`/`full+style` too. Only `MockSceneBackend` is registered today; an Isaac-facing backend is the one piece of Phase 4 not yet built (§4.3, §3.1) — adding it is a one-line change to `tests/contract/conftest.py`, by design. |
+| **1 — contract** | laptop (mock) **and** pod (Isaac), one suite parametrized over backend | **Built, `tests/contract/`, Phase 4.** Write → read-back fidelity; render determinism and order-independence (§7.1); output shapes and dtypes; injectivity proxy; diagnostics present and in range; style sensitivity — each parametrized over `base`/`base+style`/`full`/`full+style` too. Both `MockSceneBackend` and `IsaacSceneBackend` are registered; the Isaac branch is behind `@pytest.mark.isaac` and has not run on the pod yet (§4.3, §3.1) — that pod session is the one remaining Phase 4 item. |
 | **2 — Isaac only** | pod, under Isaac's interpreter | asset loading, joint-name resolution against the real Franka, annotator availability, convergence-to-fixed-point of the chosen preset |
 
 Mechanics:
@@ -1256,7 +1259,8 @@ Two tracks, and they are independent.
 2. ~~`spikes/spike_api.py` — one standalone script that meets the whole Isaac API surface in a single boot, checks everything, and never fails fast.~~ **Written, run four times, answered (§7.2).**
 3. ~~`spikes/spike_dynamic_attrs.py` — Spike 5, the `full`/`style` attribute write paths.~~ **Done** (docs/PLAN.md Phase 3b/3c). Reuses `spike_api.py`'s pure layer rather than duplicating it; its own new pure helpers (`try_candidates`, `hue_to_rgb`, `azel_to_direction`, `cube_size_radius_from_aperture`) are covered by `tests/test_spike_dynamic_attrs.py`. Resolved everything except `light.azimuth_elevation` (§7.5).
 3b. ~~`table.roughness`/`table.albedo` — the one knob pair Spike 5 never actually tested, found while scoping Phase 4's Isaac backend.~~ **Done, 2026-09-18** (docs/PLAN.md Phase 3d). Added a table prim to `spikes/spike_dynamic_attrs.py`; `table.albedo` resolved clean (joins the supported set), `table.roughness` resolved as a second dead knob next to `light.azimuth_elevation` — zero measurable pixel effect, not a write-path bug.
-4. ~~Then, against what both spikes measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.~~ **Done, 2026-09-18** (docs/PLAN.md Phase 4). `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`, `src/idtb/gates.py`, `tests/test_mock.py`, `tests/test_gates.py` (negative controls), `tests/contract/` (parametrized over group config; only the mock backend registered). **Not built yet:** an Isaac-facing `SceneBackend` — see the new §3.1 row.
+4. ~~Then, against what both spikes measured: the `SceneBackend` protocol, `MockSceneBackend`, the gates as library code, and the tier-1 contract suite.~~ **Done, 2026-09-18** (docs/PLAN.md Phase 4). `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`, `src/idtb/gates.py`, `tests/test_mock.py`, `tests/test_gates.py` (negative controls), `tests/contract/` (parametrized over group config and, now, over backend).
+5. ~~`IsaacSceneBackend` — blocked on Phase 3d's table verdict, built the same day it landed.~~ **Done, 2026-09-18** (docs/PLAN.md Phase 4). `src/idtb/sim/{app,render,writer,scene}.py`, registered behind `@pytest.mark.isaac` in `tests/contract/`. Written blind like every other Isaac-facing file here — every individual call verified in isolation by one spike or the other, but the composition (Franka + every attribute write, together, in one scene) has never run. **Remaining: the pod session that runs it (§3.1).**
 
 > ### Closing note on sequencing
 >

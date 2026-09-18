@@ -1,7 +1,17 @@
 """Shared fixtures for the pure/mock test tiers.
 
-``FULL_STYLE_SPEC`` is the canonical spec :class:`idtb.sim.mock.MockSceneBackend`
-renders end to end -- every role README §5.2 names, across all three groups.
+``FULL_STYLE_SPEC`` is the canonical **deployable** spec -- every role
+currently resolved clean and writable on both backends (README §3.1/§7.5).
+It deliberately excludes `light.azimuth`, `light.elevation` and
+`table.roughness`: all three are confirmed *blocked*
+(:class:`idtb.sim.scene.IsaacSceneBackend` refuses them at `bind()`), so no
+real run would ever activate them either -- a spec built for the tier-1
+contract suite that included them would make ``IsaacSceneBackend`` fail
+every ``full+style`` test not because of a bug, but because the spec itself
+names roles nothing should be writing. ``MockSceneBackend`` separately still
+knows how to render all three (it is not constrained by what Isaac has
+verified), just not through this shared spec.
+
 Tests that need a narrower view use ``LatentSpec.subset`` on it directly, which
 is exactly what a real run does (§6.4): one spec, one sampler, one writer.
 """
@@ -25,11 +35,8 @@ FULL_STYLE_SPEC = LatentSpec(
         Handle("cube.hue", 0.5, 0.45, group="full"),
         Handle("light.intensity", 0.0, 1.0, group="style"),
         Handle("light.warmth", 0.0, 1.0, group="style"),
-        Handle("light.azimuth", 0.0, 1.0, group="style"),
-        Handle("light.elevation", 0.0, 1.0, group="style"),
         Handle("cam.jitter.x", 0.0, 0.5, group="style"),
         Handle("cam.jitter.y", 0.0, 0.5, group="style"),
-        Handle("table.roughness", 0.0, 1.0, group="style"),
         Handle("table.albedo", 0.0, 1.0, group="style"),
         Handle("exposure", 0.0, 1.0, group="style"),
     )
