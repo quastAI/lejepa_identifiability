@@ -33,6 +33,7 @@ This milestone is README §9's critical path to a first defensible result: **Pha
 
 > README §9: `stage_v1_tabletop.usd` — table, Franka, cube, PBR materials, HDRI + area lights, camera rig (2–3 views). Debug-preset renders look right.
 
+- [ ] 🤖 **Read the docs first** — this phase is new Isaac Sim/USD surface, not a re-target of the spike scene: USD composition/referencing (Omniverse USD Composer docs), `UsdPreviewSurface`/MDL PBR authoring, `DomeLightCfg`/area-light setup, and multi-camera rig APIs in Isaac Lab. Cheaper to read these once than to burn a pod round trip per wrong guess.
 - [ ] 🤖 **Author `scenes/stage_v1_tabletop.usd`** — table, Franka, cube, as USD composition (not authored ad hoc inside `build_rig()` the way the spike scene is). Cube stays `AssetBaseCfg` (README §5.5) — the tensor-API/Fabric interaction that decision fixed is a property of the write path, not of this specific scene, and there is no reason to reopen it here.
 - [ ] 🤖 **PBR materials** — table, arm, cube get roughness/metallic/normal maps in place of the spike's flat `PreviewSurfaceCfg`. Table roughness/albedo stay `style` handles against the *real* material this time (carried-forward item 1 above).
 - [ ] 🤖 **HDRI dome + one or two area lights**, replacing the spike's single `DistantLight`. `light.intensity`/`light.warmth` need re-verifying against the new light type even though they were clean on the spike scene — a different light type is plausibly a different code path (README §7.5's own reasoning for why `light.azimuth_elevation` was carried forward rather than dropped).
@@ -44,6 +45,7 @@ This milestone is README §9's critical path to a first defensible result: **Pha
 
 > README §9: does each `full`/`style` knob still write, read back, move pixels, and stay bitwise deterministic under `standard`, against the real rig?
 
+- [ ] 🤖 **Read the docs first if a knob misbehaves against the new rig** — before assuming a knob is dead, check whether scene v1's PBR shader graph or `DomeLightCfg` exposes the underlying USD attribute under a different path/name than the spike scene's flat `PreviewSurfaceCfg`/`DistantLight` did. Isaac Sim's material/light USD schema docs first, re-spiking second.
 - [ ] 🧑🤖 Re-run `run_knob_check` (already written, reusable) for every `full`/`style` handle against scene v1's actual prims — not a rewrite of `spike_dynamic_attrs.py`, a re-target of it.
 - [ ] 🤖 **Carried-forward items 1 and 3** (see Context) are resolved here: `light.azimuth_elevation`, `table.roughness`, and `cube.y`'s weak-signal question all get their real-rig verdict in this phase, not deferred further.
 - [ ] 🤖 Update README §5.2's radii table and §3.2's Decision Register with whatever this phase measures — cube x/y radii in particular were always provisional pending "scene v1 has a table" (§5.2.1).
@@ -52,6 +54,7 @@ This milestone is README §9's critical path to a first defensible result: **Pha
 
 > README §9 Phase 3 is *closed* against the spike scene. This is the re-verification against scene v1 that §7.4 already predicted would be needed, not new scope.
 
+- [ ] 🤖 **Read the docs first** — `_resolve_bound_shader` was written against the spike scene's single flat material; before patching it for failures, check Isaac Sim's material-binding/shader-graph docs for how multi-material USD references (table/arm/cube each with their own PBR graph) expose bound shaders, so the fix generalizes instead of chasing this one scene's structure.
 - [ ] 🤖 Update `src/idtb/sim/scene.py::build_rig()` to load `stage_v1_tabletop.usd` instead of authoring the spike scene inline.
 - [ ] 🤖 Re-run the full tier-1 contract suite (`pytest -m isaac`) against it. Expect at least the light/material-path tests to need attention (new prim structure, possibly new shader resolution paths for `_resolve_bound_shader`).
 - [ ] 🤖 Carried-forward item 2 (zero-drift sweep) lands here, as a permanent addition to the contract suite — not a one-off pod check.
@@ -62,11 +65,13 @@ This milestone is README §9's critical path to a first defensible result: **Pha
 
 - [ ] 🤖 `src/idtb/gen/generate.py` does not exist yet. First write: the generation loop sketched in README §6.4, calling `idtb.gates.determinism_gate` before any shard is written, exactly as `tests/contract/` already does.
 - [ ] 🤖 Confirm `standard`'s bitwise determinism against scene v1 specifically — README §7.3 already flags that `standard`'s numbers were measured on the spike scene, and N (the `totalSpp` needed to converge) "almost certainly" changes with scene complexity even if the mechanism doesn't.
+- [ ] 🤖 **Read the docs first if N needs retuning** — Isaac Lab/RTX render-settings docs on path-tracing SPP accumulation and denoiser convergence, before guessing a new N by trial-and-error render sweeps on the pod.
 
 ## Phase 5 — OU generator
 
 > README §9: sharded writer storing (x, x′, z, z′, visibility, collision, ρ, seed, intrinsics); per-shard checkpointing.
 
+- [ ] 🤖 **Read the docs first** — HDF5 (`h5py`, chunking/parallel-write docs) vs. WebDataset (sharding/streaming docs) before deciding: the tradeoffs (random access vs. sequential streaming, concurrent shard writers for spot-preemption checkpointing) are documented by each project and shouldn't be re-derived from scratch.
 - [ ] 🤖 Dataset storage format — open per README §3.2, decided here: HDF5 vs. WebDataset vs. other, once per-sample payload size and the training-side read pattern are actually known from Phase 2's real scene.
 - [ ] 🤖 Per-shard checkpointing, so a spot-instance preemption mid-generation resumes rather than restarts (README §11 risk register).
 - [ ] 🤖 Wire in the group-tag/style-probe-split machinery README §6.4 already specifies (the third "style dims resampled" frame for the invariance probe).
@@ -82,6 +87,7 @@ This milestone is README §9's critical path to a first defensible result: **Pha
 
 > README §9: LeJEPA/SIGReg training; metrics: R²(h→z), R²(z→h), ‖Q̂ᵀQ̂−I‖_F/√n, ε, δ, bound D + (ε+D)².
 
+- [ ] 🤖 **Read the docs/paper first** — the LeJEPA/SIGReg paper's training recipe and metric definitions, and the authors' reference implementation (`github.com/klindtlab/lejepa-identifiability`), before writing training/metrics code from memory. Getting the SIGReg regularizer or the R²(h→z)/R²(z→h) definitions subtly wrong invalidates the milestone's headline number.
 - [ ] 🤖 Training/metrics code against `MockSceneBackend`-generated data first (no GPU needed for this layer at all — README §8.4).
 - [ ] 🤖 Run against Phase 6's real dataset. This is the milestone's actual deliverable: a first measured R² on photorealistic observations, comparable to the paper's Tables 1–2.
 
