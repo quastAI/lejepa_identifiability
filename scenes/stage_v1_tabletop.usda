@@ -1,0 +1,98 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    subLayers = [
+        @./materials/pbr.usda@
+    ]
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Cube "Table" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Looks/TableMaterial>
+        double size = 1
+        float3 xformOp:scale = (0.8, 0.6, 0.04)
+        double3 xformOp:translate = (0.5, 0, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "TablePedestal" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Looks/TableMaterial>
+        double size = 1
+        float3 xformOp:scale = (0.1, 0.1, 0.38)
+        double3 xformOp:translate = (0.5, 0, 0.19)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "Cube" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Looks/CubeMaterial>
+        double size = 1
+        float3 xformOp:scale = (0.06, 0.06, 0.06)
+        double3 xformOp:translate = (0.5, 0, 0.45000000000000007)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def "Lights"
+    {
+        def DomeLight "Dome"
+        {
+            color3f inputs:color = (0.75, 0.8, 0.85)
+            float inputs:intensity = 1000
+        }
+
+        def RectLight "KeyLight"
+        {
+            float inputs:colorTemperature = 5500
+            bool inputs:enableColorTemperature = 1
+            float inputs:height = 0.4
+            float inputs:intensity = 3000
+            float inputs:width = 0.4
+            double3 xformOp:translate = (0.2, -0.3, 1.4)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def RectLight "FillLight"
+        {
+            float inputs:colorTemperature = 5500
+            bool inputs:enableColorTemperature = 1
+            float inputs:height = 0.6
+            float inputs:intensity = 800
+            float inputs:width = 0.6
+            double3 xformOp:translate = (0.9, 0.4, 1.2000000000000002)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def "Cameras"
+    {
+        def Camera "Camera1"
+        {
+            matrix4d xformOp:transform = ( (-0.8944271909999156, 0.4472135954999578, 0, 0), (-0.15064871543094188, -0.30129743086188376, 0.9415544714433866, 0), (0.4210759605332595, 0.842151921066519, 0.3368607684266076, -0), (1, 1, 0.9, 1.0000000000000002) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def Camera "Camera2"
+        {
+            matrix4d xformOp:transform = ( (-1, 0, 0, 0), (0, -0.15205718425394107, 0.9883716976506173, -0), (0, 0.9883716976506173, 0.15205718425394107, -0), (0.5, 1.3, 0.7, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def Camera "Camera3"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.5, -0, 1.4, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+}
+

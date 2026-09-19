@@ -13,7 +13,14 @@ requires-python = ">=3.12"
 dependencies = ["torch", "numpy"]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+# usd-core is the standalone Pixar-USD PyPI package (real `pxr`, no
+# Omniverse Kit/SimulationApp needed) -- it authors and reads back
+# `idtb.scenegen`'s scene files locally, unlike everything Isaac-runtime
+# (README §1's "no local development loop" doesn't apply to raw USD
+# authoring). Its OpenUSD build version is not guaranteed to match Isaac
+# Sim 6.0.1's bundled `pxr` bit-for-bit; the pod session in docs/PLAN.md
+# Phase 2 is what actually confirms the authored `.usda` opens there.
+dev = ["pytest", "ruff", "usd-core"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/idtb"]

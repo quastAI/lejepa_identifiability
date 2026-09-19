@@ -81,6 +81,9 @@ The purpose of this section is to keep the plan honest about the difference betw
 | **Every source of variation is identified, recorded-as-nuisance, or held constant — there is no fourth category** | §7.4. Replaces the earlier "anything not in the latent vector is held exactly constant", which had no room for deliberate nuisance variation. |
 | **Cube colour is one `hue` handle, not three RGB handles** | §5.2.2. Hue is the discriminative axis for a colour-conditioned task and stays 1-D per object; RGB triples *n* per cube and its brightness axis confounds directly with the `style` lighting group, making the two effects inseparable. |
 | **Categorical factors (room swap, discrete material choice) never enter *z*** | §5.2.3. Not a monotone squash of a Gaussian, so it breaks Theorem 2's premise the same way clipping does. They run as cross-dataset ablations instead. |
+| **`usd-core` (standalone Pixar USD, PyPI) is a dev dependency; `idtb.scenegen` authors scene-v1's static USD assets with it** | docs/PLAN.md Phase 2. Unlike everything in `idtb.sim`, raw USD authoring needs no `SimulationApp`/Omniverse Kit, so it runs and unit-tests on macOS (`tests/test_scenegen.py`) instead of being written blind. `pxr` imports stay function-local regardless (ruff's TID253 bans the name at module level for either distribution). Its OpenUSD build is not guaranteed to match Isaac Sim 6.0.1's bundled `pxr` bit-for-bit — the docs/PLAN.md Phase 2 pod session is what actually confirms the authored `.usda` opens there. |
+| **`scenes/stage_v1_tabletop.usd` excludes the Franka** | docs/PLAN.md Phase 2. The robot's Nucleus asset root is resolved dynamically by `isaaclab_assets.FRANKA_PANDA_CFG` at runtime (`scene.py::_resolve_franka_cfg`), never a fixed literal — baking a reference to it into a checked-in `.usda` would pin exactly the kind of environment-specific path this register otherwise avoids pinning. Phase 3 rework spawns it as an `ArticulationCfg` alongside the loaded stage, not inside it. |
+| **Camera look-at authoring needs an up-vector fallback for near-vertical views** | `idtb/scenegen/stage_v1.py::_look_at_transform`. `Gf.Matrix4d.SetLookAt` with world-up `(0,0,1)` is degenerate when the view direction is nearly parallel to it — confirmed empirically (not just in theory): the top-down `Camera3` authored a literal-`FLT_MAX` transform before this was caught by `usd-core` running locally and fixed with a `(0,1,0)` fallback. A reminder that "no local Isaac runtime" (§1) doesn't mean no local bugs to catch in the parts that don't need one. |
 
 ### 3.2 Deferred — recorded here so that de-pinning does not lose the question
 
@@ -97,7 +100,7 @@ The four Spike questions that used to live in this table (render mode/preset, ph
 
 ### 3.3 Provisional — chosen to make progress, expected to be revised
 
-- The `base` latent assignment in §5.2.1 (which four arm joints, which squash radii). Arm and gripper limits are now measured; cube x/y stays provisional until scene v1 has a table.
+- The `base` latent assignment in §5.2.1 (which four arm joints, which squash radii). Arm and gripper limits are now measured; cube x/y stays provisional -- scene v1's table exists now (docs/PLAN.md Phase 2) but the radius still needs Phase 2b's pod measurement against real Franka reach, not just the table's raw footprint.
 - **Group membership of individual knobs.** `cube.size` and `cube.hue` sit in `full` because a generalised pick-and-place would vary them; `table.roughness` sits in `style` because it never would. Those are modelling judgements, and moving a knob between groups is a one-line spec change by design — the point of the `group` tag is that the decision is visible and revisable, not that it is settled.
 - ρ_style = 0 as the default. §5.4.1 predicts a spectrum crossing at ρ_style = ρ_task², which only a sweep can confirm; `rho_style` is a parameter for that reason.
 - ρ = 0.95 as the first generation configuration (§9, Phase 6). A starting point for the sweep, not a finding.
@@ -273,6 +276,9 @@ lejepa_identifiability/
 │   │                                # app.py ✅ · scene.py ✅ · writer.py ✅
 │   │                                # · render.py ✅ — IsaacSceneBackend
 │   │                                # built and run on the pod, green (§4.3)
+│   ├── scenegen/                    # authors scenes/*.usda with `usd-core`
+│   │                                # (no Isaac runtime needed) ✅ built,
+│   │                                # unit-tested locally (§3.1)
 │   ├── gates.py                     # §10.1 pipeline-correctness gates ✅ built
 │   ├── gen/                         # generate.py — dataset driver, sharded
 │   └── analysis/                    # LeJEPA training · metrics
@@ -288,11 +294,16 @@ lejepa_identifiability/
 │   ├── test_spike_api.py            # tier 0 — the spike's detectors    ✅ built
 │   │                                # + negative controls that fire
 │   ├── test_spike_dynamic_attrs.py  # tier 0 — resolve()/hue/azel/aperture ✅ built
+│   ├── test_scenegen.py             # tier 0 — real `usd-core`, not mocked;
+│   │                                # structural checks on the authored
+│   │                                # stage itself (§3.1) ✅ built
 │   ├── contract/                    # tier 1 — parametrized over backend ✅ built
 │   │                                # mock + isaac (isaac deselected by
 │   │                                # default locally; green on the pod)
 │   └── isaac/                       # tier 2 — pod only
-├── scenes/                          # stage_v1_tabletop.usd, materials/
+├── scenes/                          # stage_v1_tabletop.usda, materials/pbr.usda
+│                                    # -- generated by `python -m idtb.scenegen.build`,
+│                                    # committed like a compiled artifact
 ├── configs/                         # ρ, λ, n, render preset
 ├── infra/
 │   ├── preflight.sh                 # read-only pod survey           ✅ built
@@ -392,7 +403,7 @@ variation we do or do not ask the encoder to recover (§7.4).
 | 2 | `arm.j2` | Arm configuration | `panda_joint4` | `[-3.0718, -0.0698]` — asymmetric about 0, `Handle.from_limits` centers on the midpoint regardless | same |
 | 3 | `arm.j3` | Arm configuration | `panda_joint6` | `[-0.0175, 3.7525]` — asymmetric too | same |
 | 4 | `gripper.aperture` | Gripper aperture | `panda_finger_joint1/2` | `[0.0, 0.04]` each | mapped into the measured aperture range |
-| 5–6 | `cube.x`, `cube.y` | Cube position on table | cube root pose x, y | **not yet measured — no table in the spike scene** | x₀ + r·tanh(z₅), y₀ + r·tanh(z₆), r set from the table extent, once scene v1 has one |
+| 5–6 | `cube.x`, `cube.y` | Cube position on table | cube root pose x, y | **not yet measured against the arm's real reach** — scene v1's table extent is now concrete (0.8×0.6 m top, `idtb/scenegen/stage_v1.py::TABLE_SIZE_M`), but the radius still needs Phase 2b's pod measurement against actual Franka reach, not just the table's raw footprint | x₀ + r·tanh(z₅), y₀ + r·tanh(z₆), r set from the measured reachable subset of the table extent |
 
 Cube *z*-height is held at the table surface plus half the cube edge — a deterministic function of the other coordinates, not a free latent (and, once §5.2.2 makes edge length a latent, a function of *that*, which the writer must compute rather than bake in). Remaining Franka joints (`panda_joint3`, `panda_joint5`, `panda_joint7`) are held at a fixed nominal pose so that *n* stays small and the arm configuration is uniquely determined by the active joints. The measured `default_joint_pos` for the four active joints is `[0.0, -0.569, -2.81, 3.037]` — notably *not* centered in the range for joints 2 and 3 above, which is fine: `Handle.from_limits` centers the squash on the limit midpoint, independent of whatever pose the robot happens to default to.
 
@@ -483,6 +494,8 @@ Mitigations, in order of preference:
 4. **Measure it.** Render a segmentation pass alongside RGB, compute the fraction of cube pixels visible, and log it per sample. Identifiability can then be reported conditioned on visibility — which turns a confound into a finding.
 
 Default configuration: (1) + (2), with (4) always on, because per-sample visibility is cheap to record and enormously clarifying when a number comes out low.
+
+**Scene v1's 3-camera rig (docs/PLAN.md Phase 2, `idtb/scenegen/stage_v1.py`)** implements (1)+(2) concretely: `Camera1` keeps the spike's own high-oblique placement for continuity with what's already measured; `Camera2` sits at a distinctly different azimuth (mostly along +y, not just offset along `Camera1`'s axis) chosen specifically to target the weak `cube.y` signal below; `Camera3` is near-top-down. A test (`test_camera_rig_has_real_multi_axis_parallax`) asserts the rig doesn't collapse back to one axis. Wiring these into `IsaacSceneBackend` as three plain `Camera` sensors (not `TiledCamera` — see docs/PLAN.md Phase 3 rework for why) is still open.
 
 > **Multi-view earned its place empirically, not just theoretically.** Phase 4's single-camera contract suite measured `cube.y`'s render signal at roughly a third of `cube.x`'s (mean abs diff `0.039` vs `0.126` for the same-magnitude move) — a real but weak signal, an artefact of this one camera's oblique angle putting Y-motion closer to its own viewing axis. Worse: under enough simultaneous attribute writes in one long session, that already-weak signal was observed dropping to exactly `0.0`. A stereo/multi-view rig (2–3 cameras with real parallax) should resolve the *magnitude* problem directly — depth-aligned motion for one camera is very likely lateral, and therefore strongly visible, for another. It does not by itself explain the exact-zero drop, which is tracked as its own open item (§11) rather than assumed fixed by adding cameras.
 
