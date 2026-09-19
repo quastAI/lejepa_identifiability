@@ -149,12 +149,18 @@ def _define_dome_light(stage: Any, *, texture_file: str | None) -> Any:
     a shipped HDRI is resolved dynamically, same reasoning as the Franka
     path in the package docstring); `texture_file` lets a caller wire one in
     once a real, resolved asset path exists. A textureless dome still gives
-    a valid, uniform ambient term via `inputs:color`."""
+    a valid, uniform ambient term via `inputs:color`.
+
+    This is an indoor tabletop scene with no room shell yet (README §9's
+    room-shell scene v2 is deferred) -- the fallback color is a neutral,
+    slightly warm tone standing in for generic indoor wall/ceiling bounce,
+    not the cool blue a sky dome would use for an outdoor scene.
+    """
     from pxr import Sdf, UsdLux
 
     light = UsdLux.DomeLight.Define(stage, DOME_LIGHT_PRIM_PATH)
     light.CreateIntensityAttr(1000.0)
-    light.CreateColorAttr((0.75, 0.8, 0.85))  # cool, neutral sky fill
+    light.CreateColorAttr((0.85, 0.83, 0.80))  # neutral indoor bounce, not sky
     if texture_file is not None:
         light.CreateTextureFileAttr().Set(Sdf.AssetPath(texture_file))
     return light
