@@ -30,18 +30,25 @@ quality-grade accumulation count -- `debug` (README §7.3) only needs a
 recognisable image, not the `standard` preset's determinism, so there is no
 reason to pay for path-tracing accumulation depth here.
 
-**Confirmed on the pod:** an earlier revision omitted
-`rep.orchestrator.set_capture_on_play(False)` -- README §4.4 already listed
-it as part of the render-control API surface, but this script didn't call
-it. Replicator's writer defaults to an `on_frame` trigger that fires on
-every tick of the stage's timeline, and `open_stage()` auto-starts that
-timeline; without disabling capture-on-play, a single `step()` call left
-the writer armed and capturing indefinitely for as long as the process
-stayed alive -- observed as 179k+ files and an unbounded, still-growing
-`--out` directory rather than the intended one frame per camera.
-`set_capture_on_play(False)` decouples capture from playback, and an
-explicit `rep.orchestrator.stop()` after each camera's `step()` is a second,
-belt-and-suspenders bound on the same failure mode.
+**Confirmed on the pod, twice, in two different failure modes:**
+
+1. An earlier revision omitted `rep.orchestrator.set_capture_on_play(False)`
+   (README §4.4 already listed it as part of the render-control API
+   surface). Without it, Replicator's default on-timeline-play capture
+   trigger fired continuously once `open_stage()` auto-started the
+   timeline -- observed as 179k+ files in `--out`.
+2. Adding that call was not sufficient on its own: a `render_product`'s
+   `hydra_texture` renders *continuously* the moment it's created --
+   independent of Replicator's own frame-trigger machinery entirely -- and
+   the writer kept capturing every one of those live-render ticks. Fixed
+   per NVIDIA's own SDG-workflow documentation
+   (docs.isaacsim.omniverse.nvidia.com/6.0.0/replicator_tutorials/tutorial_replicator_sdg_workflows.html):
+   `hydra_texture.set_updates_enabled(False)` immediately after creating the
+   render product, `True` only for the duration of the intended `step()`
+   call, `False` again right after, and `rep.orchestrator.wait_until_complete()`
+   before tearing anything down -- observed as 70k+ files (on local `/tmp`
+   this time, not the network volume, but the same unbounded loop) with
+   only fix 1 applied.
 """
 
 from __future__ import annotations
@@ -110,11 +117,18 @@ def main() -> None:
         for camera_path in camera_paths:
             name = camera_path.rsplit("/", 1)[-1]
             render_product = rep.create.render_product(camera_path, (width, height))
+            # Off until the moment of capture -- a render product's hydra
+            # texture renders continuously the instant it exists, entirely
+            # independent of Replicator's own frame-trigger system (see
+            # module docstring, failure mode 2).
+            render_product.hydra_texture.set_updates_enabled(False)
             writer = rep.WriterRegistry.get("BasicWriter")
             writer.initialize(output_dir=str(scratch_dir / name), rgb=True)
             writer.attach([render_product])
+            render_product.hydra_texture.set_updates_enabled(True)
             rep.orchestrator.step(rt_subframes=args.rt_subframes)
-            rep.orchestrator.stop()  # belt-and-suspenders bound, see module docstring
+            rep.orchestrator.wait_until_complete()
+            render_product.hydra_texture.set_updates_enabled(False)
             writer.detach()
             render_product.destroy()
             print(f"[spike_scene_v1_view] rendered {name} to local scratch")
