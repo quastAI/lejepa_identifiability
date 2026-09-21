@@ -55,6 +55,12 @@ TABLE_PBR = PbrParams(diffuse_color=(0.5, 0.5, 0.5), roughness=0.75, metallic=0.
 #: from `PathTracing`'s point-sampled area lights.
 CUBE_PBR = PbrParams(diffuse_color=(0.85, 0.13, 0.11), roughness=0.4, metallic=0.0)
 
+#: docs/PLAN.md Phase 2c -- Scene v2's room shell (floor/ceiling/walls).
+#: Light matte interior finish: it is not load-bearing for any latent, just
+#: a backdrop for the dome/key/fill lights to bounce off.
+ROOM_MATERIAL_PATH = f"{LOOKS_SCOPE}/RoomMaterial"
+ROOM_PBR = PbrParams(diffuse_color=(0.75, 0.74, 0.70), roughness=0.85, metallic=0.0)
+
 
 def _define_preview_surface_material(stage: Any, material_path: str, params: PbrParams) -> Any:
     from pxr import Gf, Sdf, UsdShade
@@ -85,6 +91,18 @@ def define_materials(stage: Any) -> None:
     stage.DefinePrim(LOOKS_SCOPE, "Scope")
     _define_preview_surface_material(stage, TABLE_MATERIAL_PATH, TABLE_PBR)
     _define_preview_surface_material(stage, CUBE_MATERIAL_PATH, CUBE_PBR)
+
+
+def define_room_material(stage: Any) -> None:
+    """Author `/World/Looks/RoomMaterial` into `stage`'s current edit target.
+
+    Kept separate from `define_materials()` (table + cube only, Phase 2's
+    scope) rather than folded into it -- `stage_v1_tabletop.usda` stays
+    exactly what Phase 2 shipped and tested, whether or not Phase 2c's room
+    shell (`stage_v2_room.py`) ever composes it in.
+    """
+    stage.DefinePrim(LOOKS_SCOPE, "Scope")
+    _define_preview_surface_material(stage, ROOM_MATERIAL_PATH, ROOM_PBR)
 
 
 def build_materials_stage() -> Any:

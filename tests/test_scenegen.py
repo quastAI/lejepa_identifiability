@@ -37,6 +37,14 @@ from idtb.scenegen.stage_v1 import (
     build_stage_v1,
     write_stage_v1_usda,
 )
+from idtb.scenegen.stage_v2_room import (
+    CEILING_PRIM_PATH,
+    FLOOR_PRIM_PATH,
+    WALL_PRIM_PATHS,
+    build_stage_v2_room,
+    room_bounds,
+    write_stage_v2_room_usda,
+)
 
 
 @pytest.fixture(scope="session")
@@ -203,3 +211,76 @@ def test_write_stage_v1_usda_sublayer_path_is_relative(tmp_path):
     stage_path, _ = write_stage_v1_usda(tmp_path)
     text = stage_path.read_text()
     assert re.search(r"subLayers\s*=\s*\[\s*@\./materials/pbr\.usda@", text)
+
+
+# ---------------------------------------------------------------------------
+# stage_v2_room.py -- docs/PLAN.md Phase 2c
+# ---------------------------------------------------------------------------
+
+
+def test_room_shell_prim_hierarchy_and_types(pxr, tmp_path):
+    stage_v1_path, _ = write_stage_v1_usda(tmp_path)
+    stage = build_stage_v2_room(stage_v1_asset_path=str(stage_v1_path))
+    expected_types = {FLOOR_PRIM_PATH: "Cube", CEILING_PRIM_PATH: "Cube"}
+    expected_types.update({path: "Cube" for path in WALL_PRIM_PATHS.values()})
+    for path, type_name in expected_types.items():
+        prim = stage.GetPrimAtPath(path)
+        assert prim.IsValid(), f"missing prim {path}"
+        assert prim.GetTypeName() == type_name
+
+
+def test_room_shell_materials_bind_to_the_room_pbr_params(pxr, tmp_path):
+    from idtb.scenegen.materials import ROOM_MATERIAL_PATH, ROOM_PBR
+
+    stage_v1_path, _ = write_stage_v1_usda(tmp_path)
+    stage = build_stage_v2_room(stage_v1_asset_path=str(stage_v1_path))
+    for path in (FLOOR_PRIM_PATH, CEILING_PRIM_PATH, *WALL_PRIM_PATHS.values()):
+        shader = _bound_shader(pxr, stage, path)
+        assert shader.GetPath() == f"{ROOM_MATERIAL_PATH}/Shader"
+        assert shader.GetInput("roughness").Get() == pytest.approx(ROOM_PBR.roughness)
+
+
+def test_room_encloses_every_camera_eye_with_margin():
+    """docs/PLAN.md Phase 2c: the room must actually clear all three camera
+    frustums, not just exist -- a wall placed inside a camera's eye position
+    would put that camera outside (or inside the thickness of) the shell it
+    is supposed to be filmed from within. Requires a real margin, not just
+    a non-negative one, so a future camera move that grazes a wall fails
+    loudly here instead of showing up as a mysteriously clipped render."""
+    x_min, x_max, y_min, y_max, z_min, z_max = room_bounds()
+    margin = 0.5  # meters -- deliberately generous, not a tight fit
+    for spec in CAMERAS:
+        ex, ey, ez = spec.eye
+        assert x_min + margin <= ex <= x_max - margin, f"{spec.name} eye.x too close to a wall"
+        assert y_min + margin <= ey <= y_max - margin, f"{spec.name} eye.y too close to a wall"
+        assert z_min + margin <= ez <= z_max - margin, (
+            f"{spec.name} eye.z too close to floor/ceiling"
+        )
+
+
+def test_stage_v2_room_composes_stage_v1_through_the_reference(pxr, tmp_path):
+    """The exact regression class README §7.6 already hit once (materials
+    authored outside stage_v1's default prim never composed through a
+    `UsdFileCfg` reference at all) -- checked here for stage_v2's own
+    reference before Phase 3 rework ever loads it on the pod."""
+    stage_v1_path, _ = write_stage_v1_usda(tmp_path)
+    room_path = write_stage_v2_room_usda(tmp_path, stage_v1_path=stage_v1_path)
+
+    reopened = pxr.Usd.Stage.Open(str(room_path))
+    assert reopened.GetPrimAtPath(TABLE_PRIM_PATH).IsValid()
+    assert reopened.GetPrimAtPath(CUBE_PRIM_PATH).IsValid()
+    for spec in CAMERAS:
+        assert reopened.GetPrimAtPath(f"/World/Cameras/{spec.name}").IsValid()
+    assert reopened.GetPrimAtPath(FLOOR_PRIM_PATH).IsValid()
+
+    cube_shader = _bound_shader(pxr, reopened, CUBE_PRIM_PATH)
+    assert cube_shader.GetIdAttr().Get() == "UsdPreviewSurface"
+
+
+def test_write_stage_v2_room_usda_reference_path_is_relative(tmp_path):
+    import re
+
+    stage_v1_path, _ = write_stage_v1_usda(tmp_path)
+    room_path = write_stage_v2_room_usda(tmp_path, stage_v1_path=stage_v1_path)
+    text = room_path.read_text()
+    assert re.search(r"references\s*=\s*@\./stage_v1_tabletop\.usda@", text)

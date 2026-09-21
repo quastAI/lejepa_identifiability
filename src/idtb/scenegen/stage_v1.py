@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from idtb.scenegen.materials import CUBE_MATERIAL_PATH, TABLE_MATERIAL_PATH, define_materials
+from idtb.scenegen.primitives import bind_material, set_box_prim
 
 #: A real worktable height and a top surface big enough for the Franka's
 #: reach to matter, replacing the spike scene's 0.3x0.3 material-test pad
@@ -79,35 +80,6 @@ CAMERAS: tuple[CameraSpec, ...] = (
         TABLE_TOP_Z,
     )),
 )
-
-
-def _set_box_prim(
-    stage: Any,
-    path: str,
-    *,
-    size: tuple[float, float, float],
-    center: tuple[float, float, float],
-) -> Any:
-    """A `UsdGeom.Cube` (default size=2, i.e. unit half-extent) scaled to an
-    arbitrary axis-aligned box -- same pattern `writer.py::_write_cube_scale`
-    already uses for `cube.size` (a scale op on top of an authored unit
-    edge), so the two stay consistent."""
-    from pxr import Gf, UsdGeom
-
-    cube = UsdGeom.Cube.Define(stage, path)
-    cube.CreateSizeAttr(1.0)
-    xformable = UsdGeom.Xformable(cube)
-    xformable.AddTranslateOp().Set(Gf.Vec3d(*center))
-    xformable.AddScaleOp().Set(Gf.Vec3f(*size))
-    return cube
-
-
-def _bind_material(stage: Any, prim_path: str, material_path: str) -> None:
-    from pxr import UsdShade
-
-    prim = stage.GetPrimAtPath(prim_path)
-    material = UsdShade.Material.Get(stage, material_path)
-    UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
 
 
 def _look_at_transform(eye: tuple[float, float, float], target: tuple[float, float, float]) -> Any:
@@ -192,7 +164,7 @@ def build_stage_v1(*, dome_texture_file: str | None = None) -> tuple[Any, Any]:
 
     `materials_layer` is authored via `define_materials` as an *anonymous
     sublayer* of `stage`'s root layer, added before anything else so that
-    `_bind_material`'s `UsdShade.Material.Get(stage, ...)` resolves within
+    `bind_material`'s `UsdShade.Material.Get(stage, ...)` resolves within
     this same build pass -- binding against a material that doesn't yet
     exist anywhere the stage can see would silently author a dangling
     relationship. :func:`write_stage_v1_usda` exports `materials_layer` to
@@ -213,31 +185,31 @@ def build_stage_v1(*, dome_texture_file: str | None = None) -> tuple[Any, Any]:
     with Usd.EditContext(stage, materials_layer):
         define_materials(stage)
 
-    _set_box_prim(
+    set_box_prim(
         stage,
         TABLE_PRIM_PATH,
         size=TABLE_SIZE_M,
         center=(CUBE_XY[0], CUBE_XY[1], TABLE_TOP_Z),
     )
-    _bind_material(stage, TABLE_PRIM_PATH, TABLE_MATERIAL_PATH)
+    bind_material(stage, TABLE_PRIM_PATH, TABLE_MATERIAL_PATH)
 
     pedestal_size = (0.1, 0.1, TABLE_TOP_Z - 0.5 * TABLE_SIZE_M[2])
-    _set_box_prim(
+    set_box_prim(
         stage,
         TABLE_PEDESTAL_PRIM_PATH,
         size=pedestal_size,
         center=(CUBE_XY[0], CUBE_XY[1], 0.5 * pedestal_size[2]),
     )
-    _bind_material(stage, TABLE_PEDESTAL_PRIM_PATH, TABLE_MATERIAL_PATH)
+    bind_material(stage, TABLE_PEDESTAL_PRIM_PATH, TABLE_MATERIAL_PATH)
 
     cube_z = TABLE_TOP_Z + 0.5 * TABLE_SIZE_M[2] + 0.5 * DEFAULT_CUBE_EDGE_M
-    _set_box_prim(
+    set_box_prim(
         stage,
         CUBE_PRIM_PATH,
         size=(DEFAULT_CUBE_EDGE_M,) * 3,
         center=(CUBE_XY[0], CUBE_XY[1], cube_z),
     )
-    _bind_material(stage, CUBE_PRIM_PATH, CUBE_MATERIAL_PATH)
+    bind_material(stage, CUBE_PRIM_PATH, CUBE_MATERIAL_PATH)
 
     _define_dome_light(stage, texture_file=dome_texture_file)
     key_translate = (CUBE_XY[0] - 0.3, CUBE_XY[1] - 0.3, TABLE_TOP_Z + 1.0)
