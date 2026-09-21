@@ -60,25 +60,52 @@ class CameraSpec:
     target: tuple[float, float, float]
 
 
+#: Every authored eye is this many times its original (Phase 2) distance
+#: from the table -- docs/PLAN.md Phase 2c pod session found the *default*
+#: `UsdGeom.Camera.clippingRange`, `(1, 1000000)` in this stage's
+#: meters-per-unit-1.0 units (confirmed locally, `_define_camera` now
+#: authors an explicit one), was clipping Camera1's near foreground and
+#: sat Camera3 almost exactly *on* its 1 m near-clip boundary (its
+#: eye-to-target distance was exactly 1.0 m) -- both cameras were simply
+#: too close to their own subject for a 1 m default near plane, independent
+#: of the clipping-range fix itself. Scaled uniformly rather than re-picked
+#: per camera so every view keeps the same azimuth/elevation already
+#: measured against (README §5.3), just farther back.
+_EYE_DISTANCE_SCALE = 2.0
+
+
+def _scaled_eye(eye: tuple[float, float, float]) -> tuple[float, float, float]:
+    """`eye`, scaled by `_EYE_DISTANCE_SCALE` about `(CUBE_XY, TABLE_TOP_Z)`
+    -- moves the camera farther from the table along the same direction,
+    not to a new angle."""
+    origin = (CUBE_XY[0], CUBE_XY[1], TABLE_TOP_Z)
+    return tuple(
+        o + _EYE_DISTANCE_SCALE * (e - o) for o, e in zip(origin, eye, strict=True)
+    )
+
+
 CAMERAS: tuple[CameraSpec, ...] = (
     # High, oblique, near-top-down -- the spike's own placement (README
-    # §5.3/§7.4), kept for continuity with what's already measured.
-    CameraSpec("Camera1", eye=(1.0, 1.0, TABLE_TOP_Z + 0.5), target=_CUBE_TARGET),
+    # §5.3/§7.4), kept for continuity with what's already measured (same
+    # angle, moved back per the clipping note above).
+    CameraSpec("Camera1", eye=_scaled_eye((1.0, 1.0, TABLE_TOP_Z + 0.5)), target=_CUBE_TARGET),
     # A second view along a distinctly different azimuth (roughly
     # perpendicular to Camera1 about the cube, not just offset along the
     # same axis) so world-Y motion projects with real magnitude in at least
     # one view -- directly targeting the weak `cube.y` signal measured from
     # Camera1's single angle alone (README §5.3, docs/PLAN.md carried-forward
     # item 3).
-    CameraSpec("Camera2", eye=(CUBE_XY[0], 1.3, TABLE_TOP_Z + 0.3), target=_CUBE_TARGET),
+    CameraSpec(
+        "Camera2", eye=_scaled_eye((CUBE_XY[0], 1.3, TABLE_TOP_Z + 0.3)), target=_CUBE_TARGET
+    ),
     # Near-top-down: both cube.x and cube.y project with comparable
     # magnitude, and it's independently the strongest arm-over-cube
     # occlusion mitigation (README §5.3 mitigation 2).
-    CameraSpec("Camera3", eye=(CUBE_XY[0], CUBE_XY[1], TABLE_TOP_Z + 1.0), target=(
-        CUBE_XY[0],
-        CUBE_XY[1],
-        TABLE_TOP_Z,
-    )),
+    CameraSpec(
+        "Camera3",
+        eye=_scaled_eye((CUBE_XY[0], CUBE_XY[1], TABLE_TOP_Z + 1.0)),
+        target=(CUBE_XY[0], CUBE_XY[1], TABLE_TOP_Z),
+    ),
 )
 
 
@@ -107,11 +134,19 @@ def _look_at_transform(eye: tuple[float, float, float], target: tuple[float, flo
 
 
 def _define_camera(stage: Any, spec: CameraSpec) -> Any:
-    from pxr import UsdGeom
+    from pxr import Gf, UsdGeom
 
     path = f"{CAMERA_PARENT_PATH}/{spec.name}"
     camera = UsdGeom.Camera.Define(stage, path)
     UsdGeom.Xformable(camera).AddTransformOp().Set(_look_at_transform(spec.eye, spec.target))
+    # `UsdGeom.Camera`'s schema fallback is `(1, 1000000)` -- a 1 m near
+    # plane, confirmed locally (no camera authored one before this). That's
+    # larger than this scene's own scale: docs/PLAN.md Phase 2c's pod
+    # session found it clipping Camera1's near foreground and sitting
+    # Camera3 almost exactly on the boundary (its eye-to-target distance
+    # was exactly 1.0 m). 1 cm near / 100 m far comfortably covers a
+    # tabletop-and-a-room-sized scene either way.
+    camera.CreateClippingRangeAttr(Gf.Vec2f(0.01, 100.0))
     return camera
 
 

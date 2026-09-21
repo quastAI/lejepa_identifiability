@@ -30,9 +30,13 @@ Room dimensions are chosen, not guessed, to clear all three of stage_v1's
 camera eyes with real margin (see `room_bounds()` and
 `tests/test_scenegen.py::test_room_encloses_every_camera_eye_with_margin`,
 which would fail if a future edit shrank the room or moved a camera without
-re-checking this): a 5x5 m floor footprint and 3 m ceiling, centered on
+re-checking this): an 8x8 m floor footprint and 4 m ceiling, centered on
 `CUBE_XY` (the table's own centering point) rather than on the world
-origin, which the table is not centered on.
+origin, which the table is not centered on. Sized generously rather than
+tightly -- docs/PLAN.md Phase 2c's pod session moved the cameras
+`stage_v1.py::_EYE_DISTANCE_SCALE` farther out to clear a near-clip-plane
+bug, and this scene is reused for the whole dataset, not optimized for
+disk/render cost by staying small.
 
 The dome light is *not* re-authored here. `stage_v1.py`'s composed-in
 `DomeLight` stays textureless by default for the same "no premature pins"
@@ -54,7 +58,7 @@ from idtb.scenegen.primitives import bind_material, set_box_prim
 from idtb.scenegen.stage_v1 import CUBE_XY
 
 #: Interior footprint and ceiling height -- see module docstring for why.
-ROOM_SIZE_M = (5.0, 5.0, 3.0)  # (x span, y span, floor-to-ceiling height)
+ROOM_SIZE_M = (8.0, 8.0, 4.0)  # (x span, y span, floor-to-ceiling height)
 ROOM_CENTER_XY = CUBE_XY
 WALL_THICKNESS_M = 0.1
 
