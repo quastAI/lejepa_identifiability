@@ -31,6 +31,24 @@ real rig, and whether ``cube.y``'s multi-view fix (README §5.3) is even in
 scope here (this spike still has one camera), are exactly what this retarget
 is for.
 
+**Retargeted again at scene v2 (docs/PLAN.md Phase 2c).** ``build_rig()`` now
+references ``scenes/stage_v2_room.usda`` instead of ``stage_v1_tabletop.usda``
+directly -- the room-inclusive stage, not the room-less one, since Phase 2c
+found the room's walls/ceiling give the dome light real surfaces to bounce
+off that could plausibly change what Phase 2b measured against scene v1
+alone. Every ``_composed()`` path below is unaffected: `stage_v2_room.usda`
+references stage v1's own ``/World`` onto its own ``/World`` with an identity
+remap, so ``/World/Table``, ``/World/Lights/KeyLight``, etc. compose to the
+same absolute paths either way -- the room only *adds* ``/World/Room/*``
+prims alongside them, it doesn't move anything this spike already reads or
+writes. **Phase 2c also fully replaced the camera rig** (the old single
+oblique camera this spike's own freshly-spawned ``Camera`` sensor took its
+placement from is retired) -- ``CAMERA_EYE``/``CAMERA_TARGET`` now come from
+``CameraL``, the head-stereo rig's left eye, not the old ``Camera1``. Whether
+`cube.y`'s weak-signal question (docs/PLAN.md carried-forward item 3) looks
+any different from this new angle is exactly what this retarget is for,
+alongside the room-lighting re-check above.
+
 Run it on the pod, not here::
 
     ./isaaclab.sh -p spikes/spike_dynamic_attrs.py --out /idtb/data/spike_attrs
@@ -279,16 +297,20 @@ def dump_render_product_rtx_attributes(prim: Any) -> dict[str, Any]:
 # Isaac layer: every import lives inside a function, after SimulationApp exists.
 # ---------------------------------------------------------------------------
 
-# docs/PLAN.md Phase 2b: scene v1's authored stage replaces this spike's own
-# Round 1-5 inline-built scene (one DistantLight, a flat 0.3x0.3 material-test
-# table that was never actually load-bearing). `stage_v1_tabletop.usda` is
-# referenced in whole at SCENE_ROOT (`build_rig`), so its own internal
-# `/World/...` paths are recomposed under SCENE_ROOT, not under `/World`
-# directly -- `_composed()` does that remapping from the single source of
-# truth in `idtb.scenegen.stage_v1` rather than duplicating literal paths
-# (imported at the top of the file, next to every other module-level import).
+# docs/PLAN.md Phase 2b/2c: scene v2's room-inclusive authored stage replaces
+# this spike's own Round 1-5 inline-built scene (one DistantLight, a flat
+# 0.3x0.3 material-test table that was never actually load-bearing).
+# `stage_v2_room.usda` is referenced in whole at SCENE_ROOT (`build_rig`), so
+# its own internal `/World/...` paths are recomposed under SCENE_ROOT, not
+# under `/World` directly -- `_composed()` does that remapping from the
+# single source of truth in `idtb.scenegen.stage_v1` rather than duplicating
+# literal paths (imported at the top of the file, next to every other
+# module-level import). Unaffected by the Phase 2b -> Phase 2c retarget:
+# `stage_v2_room.usda` composes stage v1's `/World` onto its own `/World`
+# with an identity remap, so every path below still resolves the same way,
+# just with `/World/Room/*` also present alongside it now.
 
-SCENE_ROOT = "/World/SceneV1"
+SCENE_ROOT = "/World/SceneV2"
 
 
 def _composed(world_relative_path: str) -> str:
@@ -296,9 +318,10 @@ def _composed(world_relative_path: str) -> str:
     return SCENE_ROOT + world_relative_path[len("/World") :]
 
 
-GROUND_PATH = "/World/Ground"  # stage_v1_tabletop.usda deliberately excludes one
-# (docs/PLAN.md Phase 2's own scope, same reasoning as excluding the Franka) --
-# spawned separately here, same as Phase 3 rework's build_rig() will need to.
+GROUND_PATH = "/World/Ground"  # neither authored stage spawns a physics one
+# (docs/PLAN.md Phase 2/2c's own scope, same reasoning as excluding the
+# Franka) -- spawned separately here, same as Phase 3 rework's build_rig()
+# will need to.
 CUBE_PATH = _composed(CUBE_PRIM_PATH)
 TABLE_PATH = _composed(TABLE_PRIM_PATH)
 LIGHT_PATH = _composed(KEY_LIGHT_PRIM_PATH)  # KeyLight -- stage_v1.py's own
@@ -459,25 +482,28 @@ class Rig:
 
 
 def build_rig(args: argparse.Namespace) -> Rig:
-    """Build the rig against scene v1's authored stage (docs/PLAN.md Phase 2b):
-    table, cube, dome + 2 area lights, referenced in from
-    ``scenes/stage_v1_tabletop.usda`` rather than spawned inline -- replacing
-    this spike's own Round 1-5 scene (one ``DistantLight`` and a flat 0.3x0.3
-    material-test table that was never actually load-bearing).
+    """Build the rig against scene v2's room-inclusive authored stage
+    (docs/PLAN.md Phase 2c): table, cube, dome + 2 area lights, room shell,
+    referenced in from ``scenes/stage_v2_room.usda`` rather than spawned
+    inline -- replacing this spike's own Round 1-5 scene (one
+    ``DistantLight`` and a flat 0.3x0.3 material-test table that was never
+    actually load-bearing).
 
     Referenced via ``sim_utils.UsdFileCfg`` at ``SCENE_ROOT`` as a whole prim
     reference, not by swapping the live USD stage wholesale
-    (``omni.usd...open_stage()``, what ``spikes/spike_scene_v1_view.py`` uses)
-    -- this rig needs physics (``SimulationContext``) and a real camera
+    (``omni.usd...open_stage()``, what ``spikes/spike_scene_v2_view.py``
+    uses) -- this rig needs physics (``SimulationContext``) and a real camera
     *sensor* coexisting with the authored content in one scene, which is also
     exactly how Phase 3 rework will load this file alongside a dynamically
     spawned Franka. No ``InteractiveScene``/env-namespace templating, same as
     every prior round -- this spike isolates `full`/`style` write paths, which
     don't need one.
 
-    A ground plane is spawned separately: ``stage_v1_tabletop.usda``
-    deliberately excludes one (docs/PLAN.md Phase 2's own scope, same
-    reasoning as excluding the Franka).
+    A ground plane is spawned separately: neither ``stage_v1_tabletop.usda``
+    nor ``stage_v2_room.usda`` authors a physics one (docs/PLAN.md Phase 2's
+    own scope, same reasoning as excluding the Franka) -- the room's own
+    ``/World/Room/Floor`` is a plain visual/material box with no PhysX
+    collision API applied, not a substitute.
     """
     import isaaclab.sim as sim_utils
     import omni.usd
@@ -487,9 +513,9 @@ def build_rig(args: argparse.Namespace) -> Rig:
     notes: dict[str, Any] = {}
 
     repo_root = Path(__file__).resolve().parent.parent
-    stage_path = repo_root / "scenes" / "stage_v1_tabletop.usda"
+    stage_path = repo_root / "scenes" / "stage_v2_room.usda"
     if not stage_path.exists():
-        raise FileNotFoundError(f"scene v1 not found: {stage_path}")
+        raise FileNotFoundError(f"scene v2 not found: {stage_path}")
 
     render_cfg = None
     try:
