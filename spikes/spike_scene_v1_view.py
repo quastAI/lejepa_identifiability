@@ -97,11 +97,19 @@ def main() -> None:
         raise RuntimeError(f"omni.usd failed to open {stage_path}")
     stage = context.get_stage()
 
+    from idtb.scenegen.stage_v1 import CAMERA_PARENT_PATH
+
+    # stage.Traverse() also finds Kit's own built-in viewport cameras
+    # (OmniverseKit_Front/Persp/Right/Top) -- confirmed on the pod: without
+    # this filter, all 7 got captured, not just the 3 authored ones.
+    camera_prefix = CAMERA_PARENT_PATH + "/"
     camera_paths = sorted(
-        str(prim.GetPath()) for prim in stage.Traverse() if prim.GetTypeName() == "Camera"
+        str(prim.GetPath())
+        for prim in stage.Traverse()
+        if prim.GetTypeName() == "Camera" and str(prim.GetPath()).startswith(camera_prefix)
     )
     if not camera_paths:
-        raise RuntimeError(f"no Camera prims found in {stage_path}")
+        raise RuntimeError(f"no Camera prims found under {CAMERA_PARENT_PATH} in {stage_path}")
 
     viewport = get_active_viewport()
     if viewport is None:
@@ -136,7 +144,11 @@ def main() -> None:
             print(f"[spike_scene_v1_view] captured {name}")
 
         args.out.mkdir(parents=True, exist_ok=True)
-        for png in scratch_dir.iterdir():
+        # Only the finished .png outputs -- capture_viewport_to_file leaves
+        # its own internal staging file (".cap-XXXXXX") in the scratch dir,
+        # which it cleans up itself; copying it unconditionally raced that
+        # cleanup and crashed with FileNotFoundError on the pod.
+        for png in scratch_dir.glob("*.png"):
             shutil.copy2(png, args.out / png.name)
         print(f"[spike_scene_v1_view] copied results to {args.out}")
 
