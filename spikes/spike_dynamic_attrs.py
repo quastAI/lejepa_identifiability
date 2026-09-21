@@ -921,10 +921,24 @@ def _find_or_add_xform_op(prim: Any, op_type: Any) -> Any:
 
 def write_cube_scale(rig: Rig, edge_m: float) -> None:
     """``cube.size`` via an xform scale multiplier on top of the authored edge --
-    not a root-state write (README §5.2.2)."""
+    not a root-state write (README §5.2.2).
+
+    The multiplier is relative to whatever edge length is actually baked into
+    the cube's own ``UsdGeom.Cube`` ``size`` attribute, not assumed to equal
+    ``BASE_CUBE_EDGE_M``. **Confirmed on the pod (Phase 2b):** the old spike
+    scene's `CuboidCfg`-spawned cube bakes its geometry at `BASE_CUBE_EDGE_M`
+    directly (its scale op is a pure multiplier on top), but stage_v1's cube
+    (`idtb.scenegen.stage_v1::_set_box_prim`) is a *unit* `UsdGeom.Cube`
+    (baked size `1.0`) with its own separate scale op that directly encodes
+    the world size in meters. Assuming the old scene's convention set the
+    scale straight to `edge_m / BASE_CUBE_EDGE_M` (e.g. `1.5` for a wanted
+    `0.09` m edge) instead of the intended `0.09` -- read-back caught it
+    (`cube_scale`: "read back 1.5 for 0.09").
+    """
     from pxr import Gf, UsdGeom
 
-    factor = edge_m / BASE_CUBE_EDGE_M
+    baked_size = float(UsdGeom.Cube(rig.cube_prim).GetSizeAttr().Get())
+    factor = edge_m / baked_size
     op = _find_or_add_xform_op(rig.cube_prim, UsdGeom.XformOp.TypeScale)
     op.Set(Gf.Vec3f(factor, factor, factor))
 
