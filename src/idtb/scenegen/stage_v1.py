@@ -1,9 +1,9 @@
 """Authors `scenes/stage_v1_tabletop.usd` (docs/PLAN.md Phase 2): a real
-tabletop, PBR materials, an HDRI dome + two area lights, and a 3-camera rig
-with real parallax -- replacing the spike scene's disconnected material-test
-"table" prop (never actually load-bearing: the cube always rested on the
-ground plane, at `ground_z`, regardless of the table's position) and single
-camera.
+tabletop, PBR materials, an HDRI dome + two area lights, and a head-mounted
+stereo camera pair -- replacing the spike scene's disconnected
+material-test "table" prop (never actually load-bearing: the cube always
+rested on the ground plane, at `ground_z`, regardless of the table's
+position) and single camera.
 
 Scope, deliberately: this file authors the *static* scene -- table, cube,
 materials, lights, cameras. It does not spawn the Franka (see the package
@@ -60,52 +60,78 @@ class CameraSpec:
     target: tuple[float, float, float]
 
 
-#: Every authored eye is this many times its original (Phase 2) distance
-#: from the table -- docs/PLAN.md Phase 2c pod session found the *default*
-#: `UsdGeom.Camera.clippingRange`, `(1, 1000000)` in this stage's
-#: meters-per-unit-1.0 units (confirmed locally, `_define_camera` now
-#: authors an explicit one), was clipping Camera1's near foreground and
-#: sat Camera3 almost exactly *on* its 1 m near-clip boundary (its
-#: eye-to-target distance was exactly 1.0 m) -- both cameras were simply
-#: too close to their own subject for a 1 m default near plane, independent
-#: of the clipping-range fix itself. Scaled uniformly rather than re-picked
-#: per camera so every view keeps the same azimuth/elevation already
-#: measured against (README §5.3), just farther back.
-_EYE_DISTANCE_SCALE = 2.0
+#: docs/PLAN.md Phase 2c, replacing the original 3-monocular-camera rig:
+#: a single head-mounted stereo pair, matching how real humanoids actually
+#: see (Figure 01/02, 1X NEO, Unitree H1/G1 all use head-mounted stereo as
+#: their primary/sole vision sensor) -- not a wrist/eye-in-hand camera,
+#: which would move with the arm's own `full`-latent joints and confound
+#: monocular scale cues with `cube.size` exactly the way this rig is meant
+#: to avoid, and not the previous rig's arbitrary oblique "surveillance
+#: camera" placement.
+#:
+#: The head is positioned as a humanoid actually leaning over the table
+#: would be -- looking down at roughly 50 degrees below horizontal from
+#: about 0.8 m away, not hovering perfectly overhead -- and
+#: `_STEREO_BASELINE_M` (70 mm) matches a real wrist/head-mountable stereo
+#: module (Intel RealSense D435-class; a ZED-class ~120 mm module is wider
+#: than a humanoid head can usually carry). `_stereo_eye_pair` offsets two
+#: eyes from that one head position along the head's own horizontal "right"
+#: vector, the same way two real eyes/lenses sit side by side.
+#:
+#: The previous rig's `Camera2`/`Camera3` existed to patch two problems
+#: specific to `Camera1`'s arbitrary angle: a weak `cube.y` signal from a
+#: single shallow azimuth, and arm-over-cube occlusion (README §5.3,
+#: docs/PLAN.md carried-forward item 3 and Context item 5). Both are
+#: deliberately left unverified against this new single viewpoint for now:
+#: occlusion cannot be measured at all in this static scene regardless --
+#: the Franka is not spawned here (see module docstring) -- and the
+#: `cube.y` re-check is real but not blocking, deferred to whenever this
+#: rig is next pod-tested against the real backend (Phase 3 rework).
+_STEREO_BASELINE_M = 0.07
+
+_HEAD_TARGET = _CUBE_TARGET
+_HEAD_EYE = (CUBE_XY[0] + 0.35, CUBE_XY[1] + 0.35, _CUBE_TARGET[2] + 0.6)
 
 
-def _scaled_eye(eye: tuple[float, float, float]) -> tuple[float, float, float]:
-    """`eye`, scaled by `_EYE_DISTANCE_SCALE` about `(CUBE_XY, TABLE_TOP_Z)`
-    -- moves the camera farther from the table along the same direction,
-    not to a new angle."""
-    origin = (CUBE_XY[0], CUBE_XY[1], TABLE_TOP_Z)
-    return tuple(
-        o + _EYE_DISTANCE_SCALE * (e - o) for o, e in zip(origin, eye, strict=True)
-    )
+def _stereo_eye_pair(
+    eye: tuple[float, float, float], target: tuple[float, float, float], baseline: float
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Two eyes either side of `eye`, offset by `baseline` along the head's
+    own horizontal "right" vector (perpendicular to the view direction and
+    to world-up) -- the same geometry two real side-by-side lenses/eyes
+    sit in. Degenerate only if `eye`/`target` are stacked exactly on the
+    world-up axis, which this rig's ~50-degree look-down angle is nowhere
+    near; unlike `_look_at_transform`, not worth a fallback for an angle
+    this rig will never author.
 
+    Plain-tuple arithmetic, not `pxr.Gf` -- this is called at module scope
+    to build `CAMERAS` (see below), and a `pxr` import here would run at
+    *import time*, exactly the module-level Isaac import §4.2 bans (caught
+    by `tests/test_import_guard.py`, not just a style preference). A 3D
+    cross product needs no vector library.
+    """
+    import math
+
+    ex, ey, ez = eye
+    tx, ty, tz = target
+    vx, vy, vz = tx - ex, ty - ey, tz - ez
+    vlen = math.sqrt(vx * vx + vy * vy + vz * vz)
+    vx, vy, vz = vx / vlen, vy / vlen, vz / vlen
+    # cross(view_dir, world_up=(0,0,1))
+    rx, ry, rz = vy, -vx, 0.0
+    rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
+    rx, ry, rz = rx / rlen, ry / rlen, rz / rlen
+    half = baseline / 2.0
+    left = (ex - rx * half, ey - ry * half, ez - rz * half)
+    right_eye = (ex + rx * half, ey + ry * half, ez + rz * half)
+    return left, right_eye
+
+
+_LEFT_EYE, _RIGHT_EYE = _stereo_eye_pair(_HEAD_EYE, _HEAD_TARGET, _STEREO_BASELINE_M)
 
 CAMERAS: tuple[CameraSpec, ...] = (
-    # High, oblique, near-top-down -- the spike's own placement (README
-    # §5.3/§7.4), kept for continuity with what's already measured (same
-    # angle, moved back per the clipping note above).
-    CameraSpec("Camera1", eye=_scaled_eye((1.0, 1.0, TABLE_TOP_Z + 0.5)), target=_CUBE_TARGET),
-    # A second view along a distinctly different azimuth (roughly
-    # perpendicular to Camera1 about the cube, not just offset along the
-    # same axis) so world-Y motion projects with real magnitude in at least
-    # one view -- directly targeting the weak `cube.y` signal measured from
-    # Camera1's single angle alone (README §5.3, docs/PLAN.md carried-forward
-    # item 3).
-    CameraSpec(
-        "Camera2", eye=_scaled_eye((CUBE_XY[0], 1.3, TABLE_TOP_Z + 0.3)), target=_CUBE_TARGET
-    ),
-    # Near-top-down: both cube.x and cube.y project with comparable
-    # magnitude, and it's independently the strongest arm-over-cube
-    # occlusion mitigation (README §5.3 mitigation 2).
-    CameraSpec(
-        "Camera3",
-        eye=_scaled_eye((CUBE_XY[0], CUBE_XY[1], TABLE_TOP_Z + 1.0)),
-        target=(CUBE_XY[0], CUBE_XY[1], TABLE_TOP_Z),
-    ),
+    CameraSpec("CameraL", eye=_LEFT_EYE, target=_HEAD_TARGET),
+    CameraSpec("CameraR", eye=_RIGHT_EYE, target=_HEAD_TARGET),
 )
 
 
@@ -116,12 +142,15 @@ def _look_at_transform(eye: tuple[float, float, float], target: tuple[float, flo
     space); a prim's authored transform is the inverse of that.
 
     World-up `(0,0,1)` is degenerate for a near-vertical view direction --
-    confirmed empirically, not just in theory: Camera3's authored matrix
-    came out as literal FLT_MAX entries the first time this ran, because
-    its top-down eye/target pair makes the view direction parallel to that
-    up vector, collapsing `SetLookAt`'s internal cross product to zero
-    before the inversion blows it up. Falls back to world `(0,1,0)` whenever
-    the view direction is nearly parallel to `(0,0,1)`.
+    confirmed empirically, not just in theory: the original rig's
+    near-top-down camera authored a literal-FLT_MAX transform the first
+    time this ran, because its top-down eye/target pair makes the view
+    direction parallel to that up vector, collapsing `SetLookAt`'s internal
+    cross product to zero before the inversion blows it up. Falls back to
+    world `(0,1,0)` whenever the view direction is nearly parallel to
+    `(0,0,1)` -- kept even though the current head-stereo rig's ~50-degree
+    look-down angle is nowhere near that case, since any future camera
+    added here gets the same protection for free.
     """
     from pxr import Gf
 
@@ -142,10 +171,11 @@ def _define_camera(stage: Any, spec: CameraSpec) -> Any:
     # `UsdGeom.Camera`'s schema fallback is `(1, 1000000)` -- a 1 m near
     # plane, confirmed locally (no camera authored one before this). That's
     # larger than this scene's own scale: docs/PLAN.md Phase 2c's pod
-    # session found it clipping Camera1's near foreground and sitting
-    # Camera3 almost exactly on the boundary (its eye-to-target distance
-    # was exactly 1.0 m). 1 cm near / 100 m far comfortably covers a
-    # tabletop-and-a-room-sized scene either way.
+    # session found it clipping the original rig's near foreground, and one
+    # camera's eye-to-target distance sat almost exactly on that 1 m
+    # boundary. 1 cm near / 100 m far comfortably covers a
+    # tabletop-and-a-room-sized scene either way, independent of exactly
+    # how far any future camera sits from its target.
     camera.CreateClippingRangeAttr(Gf.Vec2f(0.01, 100.0))
     return camera
 

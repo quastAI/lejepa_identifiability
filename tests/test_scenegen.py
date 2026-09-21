@@ -138,28 +138,35 @@ def test_material_bindings_resolve_to_expected_pbr_params(pxr):
     assert cube_shader.GetInput("roughness").Get() == pytest.approx(CUBE_PBR.roughness)
 
 
-def test_camera_rig_has_real_multi_axis_parallax():
-    """README §5.3 / docs/PLAN.md Phase 2: a second view must not just be
-    offset along the same axis as the first, or it buys nothing for the
-    weak `cube.y` signal it's meant to fix."""
-    eyes = [spec.eye for spec in CAMERAS]
-    xs, ys, zs = zip(*eyes, strict=True)
-    assert len(set(xs)) > 1, "no camera varies eye.x -- rig collapses to one axis"
-    assert len(set(ys)) > 1, "no camera varies eye.y -- rig collapses to one axis"
-    assert len(set(zs)) > 1, "no camera varies eye.z -- no height variation across views"
-    # every camera aims at (roughly) the cube -- an occlusion-mitigating
-    # rig only helps if the views actually converge on the manipuland.
+def test_camera_rig_is_a_realistic_head_mounted_stereo_pair():
+    """docs/PLAN.md Phase 2c: replaced the original 3-monocular-camera rig
+    with a single head-mounted stereo pair (README §5.3's discussion) --
+    exactly 2 cameras, both aimed at the cube, separated by a real,
+    RealSense-D435-class baseline along a horizontal axis (matching two
+    side-by-side eyes/lenses at one head position, not two independent
+    viewpoints)."""
+    assert len(CAMERAS) == 2
     for spec in CAMERAS:
         assert spec.target[0] == pytest.approx(CUBE_XY[0], abs=1e-6)
         assert spec.target[1] == pytest.approx(CUBE_XY[1], abs=1e-6)
 
+    left, right = (spec.eye for spec in CAMERAS)
+    baseline = sum((lx - rx) ** 2 for lx, rx in zip(left, right, strict=True)) ** 0.5
+    assert baseline == pytest.approx(0.07, abs=1e-6)
+    # a real stereo module's two lenses sit side by side, not stacked
+    # vertically -- both eyes should be at the same height.
+    assert left[2] == pytest.approx(right[2], abs=1e-9)
+
 
 def test_camera_transforms_are_finite_even_for_top_down_views(pxr):
     """Regression: `SetLookAt` with world-up `(0,0,1)` is degenerate for a
-    near-vertical view direction -- Camera3's authored matrix came out as
-    literal FLT_MAX entries before `_look_at_transform` picked a fallback
-    up vector. A finite-but-wrong matrix wouldn't fail any other test here,
-    so check the actual numbers, not just that prims exist."""
+    near-vertical view direction -- the original rig's near-top-down
+    camera authored a literal-FLT_MAX transform before `_look_at_transform`
+    picked a fallback up vector. A finite-but-wrong matrix wouldn't fail
+    any other test here, so check the actual numbers, not just that prims
+    exist. The current head-stereo rig's ~50-degree angle is nowhere near
+    this degenerate case, but the protection stays generic over `CAMERAS`
+    so any future camera added here is still covered."""
     stage, _ = build_stage_v1()
     for spec in CAMERAS:
         camera_prim = stage.GetPrimAtPath(f"/World/Cameras/{spec.name}")
@@ -241,8 +248,8 @@ def test_room_shell_materials_bind_to_the_room_pbr_params(pxr, tmp_path):
 
 
 def test_room_encloses_every_camera_eye_with_margin():
-    """docs/PLAN.md Phase 2c: the room must actually clear all three camera
-    frustums, not just exist -- a wall placed inside a camera's eye position
+    """docs/PLAN.md Phase 2c: the room must actually clear every camera eye
+    in the rig, not just exist -- a wall placed inside a camera's eye position
     would put that camera outside (or inside the thickness of) the shell it
     is supposed to be filmed from within. Requires a real margin, not just
     a non-negative one, so a future camera move that grazes a wall fails

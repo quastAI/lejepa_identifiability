@@ -304,12 +304,12 @@ TABLE_PATH = _composed(TABLE_PRIM_PATH)
 LIGHT_PATH = _composed(KEY_LIGHT_PRIM_PATH)  # KeyLight -- stage_v1.py's own
 # light.intensity/warmth/azimuth_elevation target; FillLight is fixed and
 # non-latent, untouched here; the dome is ambient-only, not a per-sample knob.
-CAMERA_PATH = "/World/Camera"  # freshly spawned, NOT the authored Camera1 prim --
-# Isaac Lab's Camera sensor always spawns its own prim from a spawn config
-# rather than wrapping one that already exists (confirmed building
-# spikes/spike_scene_v1_view.py, docs/PLAN.md Phase 2).
+CAMERA_PATH = "/World/Camera"  # freshly spawned, NOT one of the authored
+# CameraL/CameraR stereo prims -- Isaac Lab's Camera sensor always spawns its
+# own prim from a spawn config rather than wrapping one that already exists
+# (confirmed building spikes/spike_scene_v1_view.py, docs/PLAN.md Phase 2).
 
-CAMERA_EYE = CAMERAS[0].eye  # Camera1 -- continuity with every prior round's placement
+CAMERA_EYE = CAMERAS[0].eye  # CameraL -- continuity with every prior round's placement
 CAMERA_TARGET = CAMERAS[0].target
 
 BASE_CUBE_EDGE_M = DEFAULT_CUBE_EDGE_M  # 0.06 m -- single source of truth now,

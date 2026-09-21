@@ -1,6 +1,6 @@
 """Authors `scenes/stage_v2_room.usda` (docs/PLAN.md Phase 2c): an empty
 room shell -- floor, ceiling, four walls -- around scene v1's table, cube,
-lights, and 3-camera rig.
+lights, and head-mounted stereo camera pair.
 
 Composed by *referencing* `stage_v1_tabletop.usda`'s `/World` onto this
 file's own `/World` (its own default prim), not by extending
@@ -11,7 +11,7 @@ it keeps `stage_v1_tabletop.usda` exactly what Phase 2 shipped and tested,
 unmodified, whether or not a room ever wraps it. The reference's target
 primPath (`/World`) equals this file's own default prim path, so every
 absolute path stage_v1 already authored (`/World/Table`,
-`/World/Cameras/Camera1`, ...) survives unchanged into stage_v2 -- Phase 3
+`/World/Cameras/CameraL`, ...) survives unchanged into stage_v2 -- Phase 3
 rework's runtime code that looks those paths up does not need to change
 when it switches from loading stage_v1 to stage_v2.
 
@@ -26,17 +26,17 @@ builds with an absolute reference for that reason and repoints it to a
 relative one only at export, mirroring `write_stage_v1_usda`'s identical
 repoint-at-export step for its materials sublayer).
 
-Room dimensions are chosen, not guessed, to clear all three of stage_v1's
-camera eyes with real margin (see `room_bounds()` and
+Room dimensions are chosen, not guessed, to clear stage_v1's camera eyes
+with real margin (see `room_bounds()` and
 `tests/test_scenegen.py::test_room_encloses_every_camera_eye_with_margin`,
-which would fail if a future edit shrank the room or moved a camera without
-re-checking this): an 8x8 m floor footprint and 4 m ceiling, centered on
-`CUBE_XY` (the table's own centering point) rather than on the world
-origin, which the table is not centered on. Sized generously rather than
-tightly -- docs/PLAN.md Phase 2c's pod session moved the cameras
-`stage_v1.py::_EYE_DISTANCE_SCALE` farther out to clear a near-clip-plane
-bug, and this scene is reused for the whole dataset, not optimized for
-disk/render cost by staying small.
+which would fail if a future edit shrank the room or moved a camera
+without re-checking this): a 3x3 m floor footprint and 2.5 m ceiling,
+centered on `CUBE_XY` (the table's own centering point) rather than on the
+world origin, which the table is not centered on. Ordinary small-room
+scale, not oversized -- stage_v1's rig is now a single head-mounted stereo
+pair sitting close to the table (`stage_v1.py`'s humanoid-lean-over
+position, ~0.8 m from the cube), not the earlier 3-camera rig's farther-out
+placements that used to need an 8x8 m room to clear.
 
 The dome light is *not* re-authored here. `stage_v1.py`'s composed-in
 `DomeLight` stays textureless by default for the same "no premature pins"
@@ -58,7 +58,7 @@ from idtb.scenegen.primitives import bind_material, set_box_prim
 from idtb.scenegen.stage_v1 import CUBE_XY
 
 #: Interior footprint and ceiling height -- see module docstring for why.
-ROOM_SIZE_M = (8.0, 8.0, 4.0)  # (x span, y span, floor-to-ceiling height)
+ROOM_SIZE_M = (3.0, 3.0, 2.5)  # (x span, y span, floor-to-ceiling height)
 ROOM_CENTER_XY = CUBE_XY
 WALL_THICKNESS_M = 0.1
 
