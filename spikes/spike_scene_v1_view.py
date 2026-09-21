@@ -141,6 +141,17 @@ def main() -> None:
                 simulation_app.update()
             task.result()  # re-raises if _capture() failed
 
+            # wait_for_result() resolves once the capture is *requested*, not
+            # once its file is actually finalized on disk (the same
+            # .cap-XXXXXX -> final-name step behind the earlier copy crash).
+            # Confirmed on the pod: without this, only the *last* camera's
+            # PNG was silently missing from --out every time -- every
+            # earlier camera got this same settle time "for free" from the
+            # next camera's own pre-capture pump, but the last one went
+            # straight into the copy step with no further ticks.
+            for _ in range(args.settle_frames):
+                simulation_app.update()
+
             print(f"[spike_scene_v1_view] captured {name}")
 
         args.out.mkdir(parents=True, exist_ok=True)
