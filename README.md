@@ -61,7 +61,7 @@ The purpose of this section is to keep the plan honest about the difference betw
 | **`TiledCamera` is safe to use** | §7.2 Spike 4. Identical frame statistics to `Camera`, and correctly distinguishes two envs holding different states — no sign of [IsaacSim #367](https://github.com/isaac-sim/IsaacSim/issues/367)'s tile corruption on this build. Worth the throughput win with no observed downside. |
 | **Isaac's camera sensor output is an aliased, reused buffer — always `.clone()` immediately** | §7.2 Spike 1 (unplanned finding). `camera.data.output[...]` returns the same underlying tensor across calls, on every render mode tried; a caller that doesn't clone before the next capture silently observes the wrong frame. Permanent constraint on `writer.py`/`generate.py`, not a settings choice. |
 | The pipeline is built against a `SceneBackend` protocol with a mock implementation | §4.3. Forced by the absence of any local Isaac runtime. **Built** — `src/idtb/sim/backend.py`, `src/idtb/sim/mock.py`. |
-| **`IsaacSceneBackend` is built and run on the pod — tier-1 contract suite green** | `src/idtb/sim/{app,render,writer,scene}.py`. Declares support for exactly what §7.2/§7.5 confirmed — `base`, `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter`, `exposure`, `table.albedo` — and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError`, since all three are confirmed **blocked** (§7.5). Combining a Franka arm with every attribute write in one scene surfaced real defects the spikes' isolated checks couldn't: a `FabricFrameView` prim-path gap, a `SimulationApp` teardown crash, and — the deepest one — physics writes never reaching the render at all without a real `sim.step()`, and a kinematic cube's tensor-API pose write separately breaking its own material rendering (§5.5). All fixed; `pytest -m isaac` — 30 passed, 2 skipped, 0 failed. One open, scoped finding carried forward: `cube.y`'s render signal is real but weak from this single camera's angle and was observed dropping to exactly zero under enough compounding attribute writes in one session — evidence *for* the §5.3 multi-view mitigation, tracked in §11, not yet root-caused further. |
+| **`IsaacSceneBackend` is built and run on the pod — tier-1 contract suite green** | `src/idtb/sim/{app,render,writer,scene}.py`. Declares support for exactly what §7.2/§7.5 confirmed — `base`, `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter`, `exposure`, `table.albedo` — and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError`, per that verdict against the *old spike scene*. **Stale as of §7.6**: `table.roughness` is no longer blocked against scene v1, and `light.azimuth_elevation` is technically responsive though still impractical — `ROLE_WRITE_PATHS` gets updated in Phase 3 rework, not yet. Combining a Franka arm with every attribute write in one scene surfaced real defects the spikes' isolated checks couldn't: a `FabricFrameView` prim-path gap, a `SimulationApp` teardown crash, and — the deepest one — physics writes never reaching the render at all without a real `sim.step()`, and a kinematic cube's tensor-API pose write separately breaking its own material rendering (§5.5). All fixed; `pytest -m isaac` — 30 passed, 2 skipped, 0 failed. One open, scoped finding carried forward: `cube.y`'s render signal is real but weak from this single camera's angle and was observed dropping to exactly zero under enough compounding attribute writes in one session — evidence *for* the §5.3 multi-view mitigation, tracked in §11, not yet root-caused further. |
 | Tests accompany every module; the §10.1 correctness gates are executable tests | §10.3. |
 | One installable package `src/idtb/`, never top-level `sim`/`gen`/`eval` | Those names collide with Kit extensions on Isaac's `sys.path`, and `eval` shadows a builtin. §4.6. |
 | Handles are keyed by **role** (`arm.j0`, `cube.x`), not by Franka joint name | §6.2. A spec keyed on asset-specific names cannot be shared with the mock, which makes the tier-1 contract suite impossible. |
@@ -91,10 +91,10 @@ The purpose of this section is to keep the plan honest about the difference betw
 |---|---|---|
 | **Dataset storage format** (HDF5 / WebDataset / other) | Write behind a small writer interface; decide once the per-sample payload size and the training-side read pattern are known. | Phase 5 |
 | **Image resolution** | Candidates 128×128 and 224×224. Cheap to ablate; treat as an experimental variable rather than a configuration decision. | Phase 8 |
-| ~~Which `full`/`style` knobs are writable at all, and through which API call~~ | **Resolved, §7.5.** `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `cam.jitter` are all writable and bitwise-deterministic under the revised `standard` (adds `resetPtAccumOnAnimTimeChange=True`). `light.azimuth_elevation` is writable (confirmed exact via read-back) but has no measurable effect on the render in any tested config — blocked, scoped to this spike scene's `DistantLight`, re-test against scene v1's light rig before deciding its fate (§11). | — |
-| **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the determinism blocker (§7.5) is resolved for every handle except `light.azimuth_elevation` and `table.roughness`, so this is open work now, not blocked work. | Phase 3 / Phase 2 |
+| ~~Which `full`/`style` knobs are writable at all, and through which API call~~ | **Resolved against scene v1, §7.6.** `cube.size`, `cube.hue`, `light.intensity`, `light.warmth`, `table.roughness`, `table.albedo` are all writable and bitwise-deterministic. `cam.jitter` writes and is strongly responsive but has a small residual non-determinism, tracked in §11. `light.azimuth_elevation` writes cleanly but is still ~2,500–120,000× weaker than every other knob — technically responsive, not practically usable as rigged. | — |
+| **Squash radii for every `full` and `style` handle** | Measured ranges from the same spike, plus scene v1 for anything table-relative. `cube.size`'s upper bound is already pinned by the *measured* gripper aperture (§5.2.2); the determinism blocker (§7.5/§7.6) is resolved for every handle including `table.roughness` now — only `cam.jitter`'s small residual and `light.azimuth_elevation`'s practical uselessness remain open. | Phase 3 / Phase 2 |
 | ~~Whether `exposure` has a usable lever at all~~ | **Resolved, §7.5.** Three carb keys accepted and measured to move pixels, and bitwise-deterministic under the revised `standard`. | — |
-| ~~Whether `table.roughness`/`table.albedo` are writable and bitwise-deterministic~~ | **Resolved, §7.5.** `table.albedo` writable, bitwise-deterministic, responsive — joins the backend's supported set. `table.roughness` writable and bitwise-deterministic but zero measurable pixel effect — blocked, scoped to this spike scene, next to `light.azimuth_elevation` (§11). | — |
+| ~~Whether `table.roughness`/`table.albedo` are writable and bitwise-deterministic~~ | **Resolved against scene v1, §7.6.** Both writable, bitwise-deterministic, and now clearly responsive (`table.roughness` was a dead knob only against the old scene's flat material/lighting, not structurally). | — |
 
 The four Spike questions that used to live in this table (render mode/preset, physics-step requirement, accumulation depth N, `TiledCamera` vs. `Camera`) are all answered — moved to §3.1, §7.2.
 
@@ -191,7 +191,7 @@ class SceneBackend(Protocol):
 ```
 
 - **`MockSceneBackend`** (`src/idtb/sim/mock.py`, **built**) — an analytic numpy renderer: anti-aliased sprites for the cube (position/size/hue) and a joint-driven arm marker, plus a global style tone (light, camera jitter, table, exposure). Deterministic and injective *by construction*, no RNG anywhere.
-- **`IsaacSceneBackend`** (`src/idtb/sim/scene.py`, plus `app.py`/`render.py`/`writer.py`) — real, lazy-imports Isaac, runs remotely. **Built and run on the pod (§3.1); tier-1 contract suite green.** `bind()` declares support for exactly the roles §7.2/§7.5 confirmed and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError` — all three are confirmed **blocked**, not merely unverified. §7.4 already predicts this backend gets rewritten once scene v1 replaces the spike scene's light rig and table material.
+- **`IsaacSceneBackend`** (`src/idtb/sim/scene.py`, plus `app.py`/`render.py`/`writer.py`) — real, lazy-imports Isaac, runs remotely. **Built and run on the pod (§3.1); tier-1 contract suite green.** `bind()` declares support for exactly the roles §7.2/§7.5 confirmed against the *old spike scene* and refuses `light.azimuth`/`light.elevation`/`table.roughness` via `UnsupportedRoleError`. §7.4 already predicted this backend gets rewritten once scene v1 replaces the spike scene's light rig and table material — **§7.6 is that re-test**: `table.roughness` is resolved clean against scene v1, so this refusal list is stale, updated in Phase 3 rework alongside the rest of the rewrite.
 
 The mock is not a convenience. It does two jobs:
 
@@ -451,10 +451,10 @@ what the §7.5 attribute spike is for.
 |---|---|---|---|
 | `light.intensity` | Dome / key light brightness | USD light attribute | The range must keep the image out of clipping at both ends: a blown-out or black frame destroys injectivity for *every* dimension at once, not just this one. |
 | `light.warmth` | Light colour temperature | USD light attribute | Kept on a 1-D warmth axis, for the same reason `cube.hue` is 1-D. |
-| `light.azimuth`, `light.elevation` | Key-light direction — "lighting jitter" | light prim transform | Shadow direction is the most visually salient style cue, and therefore the strongest test of invariance. |
+| `light.azimuth`, `light.elevation` | Key-light direction — "lighting jitter" | light prim transform | Shadow direction is the most visually salient style cue, and therefore the strongest test of invariance. **Re-tested against scene v1's `RectLight`, §7.6**: writable, bitwise-deterministic, and no longer *exactly* zero effect like the old `DistantLight` — but ~2,500–120,000× weaker than every other knob, so still not practically usable as rigged. Worth a larger/more central key light before relying on this as the invariance test. |
 | `cam.jitter.*` | Per-capture camera pose jitter about the nominal view | `set_world_poses_from_view`, **per capture** | Spike 1 aimed the camera once, at boot. Per-sample re-aiming is a different usage pattern and gets its own check. Radius stays small enough that §5.3's occlusion geometry is not substantially changed. |
 | `table.albedo` | Table material colour | USD material attribute (`PreviewSurface.diffuseColor`, grey) | Continuous, squashes cleanly. **Resolved clean, §7.5**: bitwise-deterministic and responsive, though the measured effect is far smaller than every other knob's — worth a bigger/more central table patch before trusting it as a strong training signal. |
-| `table.roughness` | Table material roughness | USD material attribute (`PreviewSurface.roughness`) | Continuous. **Blocked, §7.5**: writable and exactly bitwise-deterministic, but zero measurable pixel effect in this scene — same category as `light.azimuth`/`light.elevation`, carried forward rather than dropped. |
+| `table.roughness` | Table material roughness | USD material attribute (`PreviewSurface.roughness`) | Continuous. **Resolved clean against scene v1, §7.6**: writable, bitwise-deterministic, and now clearly responsive (`mad_vs_base` 1.86) — the old scene's exactly-zero effect was specific to its flat material/lighting, not a structural limit on the knob itself. |
 | `exposure` | Post-process exposure | carb / post-process setting, **if one exists** | Locating the lever is itself a spike question. |
 
 > ### ⚠ Categorical style factors do not fit inside *z*
@@ -958,6 +958,60 @@ addition disturbed nothing already resolved, and:
   materially different environment, and both should be re-tested against it
   together before either is excluded for real.
 
+### 7.6 Spike 5 re-gate against scene v1 — resolved, 2026-09-21 (docs/PLAN.md Phase 2b)
+
+`spike_dynamic_attrs.py` was retargeted to reference `scenes/stage_v1_tabletop.usda`
+(`sim_utils.UsdFileCfg`, a whole-file prim reference) instead of its own
+Round 1–5 inline scene, and re-run under the real `standard` recipe
+(`--reset-pt-accum-on-time-change`). Three real bugs surfaced and were fixed
+before a clean re-gate was possible — worth recording since two of them are
+structural, not spike-specific, and would have hit Phase 3 rework identically:
+
+- **`cube.size` silently wrote the wrong physical size.** `write_cube_scale`'s
+  multiplier (`edge_m / BASE_CUBE_EDGE_M`) assumed the cube's own baked
+  geometry was already `BASE_CUBE_EDGE_M`, true for the old spike's
+  `CuboidCfg`-spawned cube but not for `stage_v1.py`'s unit `UsdGeom.Cube`
+  (baked size `1.0`, its own scale op *is* the world size directly) — a
+  requested `0.09` m edge silently became `1.5` m. Fixed by reading the
+  cube's actual baked size at write time instead of assuming it.
+- **Materials were unreachable through a scene reference.** `idtb.scenegen.materials`
+  authored `/Looks/...` as a sibling of `/World` (`stage_v1.py`'s default
+  prim). A `UsdFileCfg` reference only pulls in the default prim's own
+  subtree — content outside it, like the old `/Looks`, never composes in at
+  all, so every shader-bound knob (`cube.hue`, `table.roughness`,
+  `table.albedo`) failed with "shader was never resolved," not because the
+  binding was wrong but because the bound material didn't exist anywhere in
+  the composed stage. This would have hit **Phase 3 rework identically**,
+  since combining this stage with a dynamically-spawned Franka needs the
+  same reference-based composition, not a whole-stage swap. Fixed at the
+  source: materials now author under `/World/Looks/...`.
+- Not a bug: the spike's own `pathtracing_denoiser_off` preset predates
+  `resetPtAccumOnAnimTimeChange` (§7.5) and never baked it in by default,
+  kept that way deliberately so the flag stays independently toggleable for
+  A/B comparison (the real `standard` preset in `render.py` already includes
+  it unconditionally). Omitting `--reset-pt-accum-on-time-change` on the
+  first re-gate run reproduced README §7.5's own pre-fix "Round 1" signature
+  exactly (`cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter` all
+  non-deterministic) — a usage gap, not a regression.
+
+**With all three fixed, the real verdict** (128×128, `standard` +
+`resetPtAccumOnAnimTimeChange`; `mad` in raw uint8 units, 0–255 per channel):
+
+| Knob | `mad_vs_base` | Bitwise deterministic | Verdict |
+|---|---|---|---|
+| `cube.size` | 0.61 | yes | clean |
+| `cube.hue` | 0.46 | yes | clean |
+| `light.intensity` | 1.15 | yes | clean |
+| `light.warmth` | 0.33 | yes | clean |
+| `table.albedo` | 14.82 | yes | clean — **much stronger** against real PBR + `RectLight` than the old scene's `0.00014` |
+| `table.roughness` | 1.86 | yes | **no longer a dead knob** — the old scene's exactly-`0.0` effect was specific to its flat material/lighting, not a structural limit; joins the resolved set |
+| `light.azimuth_elevation` | 0.00012 | yes | **still effectively dead in practice.** No longer *exactly* zero like the old `DistantLight` (a genuine, if tiny, real change), but ~2,500–120,000× weaker than every other knob here — not a usable `style` latent as currently rigged. The `KeyLight` `RectLight`'s small size/placement likely makes its own rotation nearly imperceptible from this camera; worth revisiting with a larger or more central key light before writing this off a second time |
+| `cam.jitter` | 11.36 | **no** — small residual (`mad` 4.07×10⁻⁵, ≈2 pixel-units out of 49,152) | real, strong sensitivity; a genuinely new, small non-determinism specific to the camera-pose write path (`set_world_poses_from_view`), distinct from every attribute-write knob above, all of which are now bitwise-clean. Tracked, not yet root-caused — see §11 |
+
+`cube.size`'s `mad_vs_base` is deliberately not compared to its own old-scene
+number — the old and new scenes' base edge/camera framing differ enough that
+only the *bitwise-clean* verdict transfers meaningfully, not the raw
+magnitude.
 
 ## 8. Infrastructure
 
@@ -1249,7 +1303,8 @@ Mechanics:
 | A latent's render signal is real but weak from a given single camera, and can drop to exactly zero under enough compounding writes | Medium, open | **New, found on the pod, 2026-09-18.** `cube.y`'s signal measured at roughly a third of `cube.x`'s magnitude for the same-size move (this camera's oblique angle puts Y-motion closer to its own viewing axis) and was observed hitting bit-exact `0.0` in one long test session under enough simultaneous attribute writes — a genuine per-view weak-signal robustness gap, not the render-freezing bug §5.5 already fixed (both `cube.x`, `cube.y`, and every other base dim register real signal in isolation). Expected to improve directly once the multi-view rig (§5.3, §9 Phase 2) gives a second, differently-angled camera to fall back on; the exact-zero mechanism itself is not yet root-caused and should not be assumed fixed by adding cameras alone. Test coverage: `tests/contract/test_backend_contract.py::test_base_knobs_are_all_sensitive`, added specifically because the pre-existing tests could (and did) pass on the `full`/`style` dims' signal alone while `base` dims stayed silently disconnected underneath. |
 | Cube rotational symmetry hides a latent dimension | High | Omit yaw from `base`; switch to a visually asymmetric object before introducing orientation latents (§5.2.1). |
 | A `style` knob is silently disconnected, so invariance is measured for free | High | **New with the group design.** A write that lands but changes no pixels is indistinguishable from a perfectly invariant encoder in every downstream metric. Mitigated by §7.5's per-knob sensitivity check, ranked above determinism, and by §10.1's style-sensitivity gate running on generated data, not only in the spike. |
-| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | **Resolved for `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/`cam.jitter`/`table.albedo`; Medium, open, scoped for `light.azimuth_elevation` and `table.roughness`** | **Fixed.** Adding `/rtx/resetPtAccumOnAnimTimeChange=True` to `standard` (§7.5) made every attribute except light rotation and table roughness bitwise-deterministic and correctly responsive, with no mode change and no cost to `base`. `light.azimuth_elevation` remains blocked after seven falsified render-config hypotheses and a confirmed, fixed write bug (Euler-decomposition axis order) — evidence points to this specific `DistantLight`'s orientation not being consumed by the shading path at all, independent of any carb setting. `table.roughness` joined it later: exact write, exact bitwise determinism, but zero measurable pixel effect — likely no visible specular highlight on the table from this camera angle in this scene. Neither is dropped: scene v1 replaces this light type and this material entirely (§7.4), so both are carried forward as explicit re-test items against the real rig, not closed questions. |
+| `full`/`style` attribute write paths are not bitwise-deterministic under `standard` | **Resolved against scene v1 (§7.6) for `cube.size`/`cube.hue`/`light.intensity`/`light.warmth`/`table.roughness`/`table.albedo`; Low, `light.azimuth_elevation` practically unusable but no longer blocked; Medium, open for `cam.jitter`'s small residual** | **Fixed for six of seven.** `table.roughness`, previously a confirmed dead knob against the old scene's flat material/lighting, is now clearly responsive (`mad_vs_base` 1.86) — the old finding was scene-specific, not structural. `light.azimuth_elevation` is no longer *exactly* zero (a genuine, if tiny, change from the old `DistantLight`), but at ~2,500–120,000× weaker than every other knob it remains impractical as a `style` latent without a larger/more central key light. `cam.jitter` is strongly responsive but picked up a small, new residual non-determinism (`mad` 4.07×10⁻⁵, ≈2 pixel-units) specific to its camera-pose write path (`set_world_poses_from_view`), distinct from every attribute-write knob here, all of which are bitwise-clean — not yet root-caused. |
+| `cam.jitter`'s camera-pose write path has a small residual non-determinism | **New, §7.6, 2026-09-21. Low — small relative to every other risk here.** `set_world_poses_from_view` measured `mad` 4.07×10⁻⁵ (order-independence *and* back-to-back) against scene v1, roughly 2 pixel-units out of 49,152 in a 128×128 frame — real sensitivity to the jitter itself is strong (`mad_vs_base` 11.36) and unaffected. Every attribute-write knob (light/material/geometry) is fully bitwise-clean under the same recipe; only the camera-pose write path shows this. Not yet root-caused — camera pose changes affect every ray in the frame, unlike a single attribute, so it may simply have a different, harder-to-fully-reset accumulation interaction than an attribute write. Worth revisiting if it grows, not urgent at this magnitude. |
 | ρ_style = 0 breaks App. F's isotropy condition | Medium | §5.4.1 argues the break is in the benign direction — an infinitely fast dimension leaves the top of the spectrum rather than interleaving into it — but that is *our* reading, not the paper's. Treated as a falsifiable prediction: `R²(h → z_style) ≈ 0` is measured in every run, and the ρ_style sweep (§9 Phase 8) tests the predicted crossing at ρ_task². If style latents prove linearly decodable, the group split is wrong and gets rethought, not patched. |
 | `cube.size` confounds with camera distance under a single view | Medium | A larger cube further away renders near-identically to a smaller one nearer — non-injectivity of the same kind as §5.3's occlusion, introduced by the `full` group. Mitigated by the 2–3 cameras §5.3 already prescribes, and by keeping the size radius small relative to the depth range; the injectivity proxy in §10.1 is what would catch it. |
 | Bounded joints break Gaussianity of z | High | Absorbed tanh squash (§5.1). Never clip, never wrap. |
