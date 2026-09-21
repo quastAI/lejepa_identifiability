@@ -29,6 +29,19 @@ the render cost itself. `--rt-subframes` defaults low (4) rather than a
 quality-grade accumulation count -- `debug` (README §7.3) only needs a
 recognisable image, not the `standard` preset's determinism, so there is no
 reason to pay for path-tracing accumulation depth here.
+
+**Confirmed on the pod:** an earlier revision omitted
+`rep.orchestrator.set_capture_on_play(False)` -- README §4.4 already listed
+it as part of the render-control API surface, but this script didn't call
+it. Replicator's writer defaults to an `on_frame` trigger that fires on
+every tick of the stage's timeline, and `open_stage()` auto-starts that
+timeline; without disabling capture-on-play, a single `step()` call left
+the writer armed and capturing indefinitely for as long as the process
+stayed alive -- observed as 179k+ files and an unbounded, still-growing
+`--out` directory rather than the intended one frame per camera.
+`set_capture_on_play(False)` decouples capture from playback, and an
+explicit `rep.orchestrator.stop()` after each camera's `step()` is a second,
+belt-and-suspenders bound on the same failure mode.
 """
 
 from __future__ import annotations
@@ -78,6 +91,12 @@ def main() -> None:
         raise RuntimeError(f"omni.usd failed to open {stage_path}")
     stage = context.get_stage()
 
+    # Without this, the writer's default on_frame trigger fires on every
+    # tick of the timeline open_stage() just auto-started, not just the
+    # explicit step() below -- confirmed on the pod as an unbounded,
+    # still-growing capture loop (see module docstring).
+    rep.orchestrator.set_capture_on_play(False)
+
     camera_paths = sorted(
         str(prim.GetPath()) for prim in stage.Traverse() if prim.GetTypeName() == "Camera"
     )
@@ -95,6 +114,7 @@ def main() -> None:
             writer.initialize(output_dir=str(scratch_dir / name), rgb=True)
             writer.attach([render_product])
             rep.orchestrator.step(rt_subframes=args.rt_subframes)
+            rep.orchestrator.stop()  # belt-and-suspenders bound, see module docstring
             writer.detach()
             render_product.destroy()
             print(f"[spike_scene_v1_view] rendered {name} to local scratch")
