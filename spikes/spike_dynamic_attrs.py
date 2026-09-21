@@ -16,6 +16,21 @@ all, so README §5.2.3's two table knobs sat undeclared rather than merely
 unresolved. ``build_rig()`` now spawns one; the two checks follow the same
 three-question recipe as everything else via :func:`run_knob_check`.
 
+**Retargeted at scene v1 (docs/PLAN.md Phase 2b).** Every prior round tested
+this spike's own inline-built scene: one ``DistantLight`` and a flat 0.3x0.3
+material-test table that was never actually load-bearing. ``build_rig()`` now
+references ``scenes/stage_v1_tabletop.usda`` in whole instead -- real PBR
+materials, an HDRI dome, two ``RectLight``s (``KeyLight``/``FillLight``) in
+place of the single ``DistantLight``. Every read/write helper below turned
+out to be generic enough (``UsdLux.LightAPI``, raw shader/xform manipulation,
+never a light-type- or Isaac-Lab-asset-specific call) to need no changes of
+its own; only ``build_rig()``'s scene construction and
+``respawn_light_and_write_direction``'s respawned light type changed. Whether
+``light.azimuth_elevation``/``table.roughness`` stay dead knobs against this
+real rig, and whether ``cube.y``'s multi-view fix (README §5.3) is even in
+scope here (this spike still has one camera), are exactly what this retarget
+is for.
+
 Run it on the pod, not here::
 
     ./isaaclab.sh -p spikes/spike_dynamic_attrs.py --out /idtb/data/spike_attrs
@@ -92,6 +107,16 @@ from pathlib import Path
 from typing import Any
 
 import torch
+
+from idtb.scenegen.stage_v1 import (
+    CAMERAS,
+    CUBE_PRIM_PATH,
+    CUBE_XY,
+    DEFAULT_CUBE_EDGE_M,
+    KEY_LIGHT_PRIM_PATH,
+    TABLE_PRIM_PATH,
+    TABLE_TOP_Z,
+)
 
 # ---------------------------------------------------------------------------
 # Reuse spike_api.py's pure layer -- loaded by path, `spikes/` is a script
@@ -254,17 +279,41 @@ def dump_render_product_rtx_attributes(prim: Any) -> dict[str, Any]:
 # Isaac layer: every import lives inside a function, after SimulationApp exists.
 # ---------------------------------------------------------------------------
 
-GROUND_PATH = "/World/Ground"
-LIGHT_PATH = "/World/Light"
-CUBE_PATH = "/World/Cube"
-TABLE_PATH = "/World/Table"
-CAMERA_PATH = "/World/Camera"
+# docs/PLAN.md Phase 2b: scene v1's authored stage replaces this spike's own
+# Round 1-5 inline-built scene (one DistantLight, a flat 0.3x0.3 material-test
+# table that was never actually load-bearing). `stage_v1_tabletop.usda` is
+# referenced in whole at SCENE_ROOT (`build_rig`), so its own internal
+# `/World/...` paths are recomposed under SCENE_ROOT, not under `/World`
+# directly -- `_composed()` does that remapping from the single source of
+# truth in `idtb.scenegen.stage_v1` rather than duplicating literal paths
+# (imported at the top of the file, next to every other module-level import).
 
-CUBE_TRANSLATION_XY = (0.45, 0.0)  # z is derived from the base edge, in build_rig()
-CAMERA_EYE = (1.0, 1.0, 0.9)
-CAMERA_TARGET = (0.45, 0.0, 0.1)
+SCENE_ROOT = "/World/SceneV1"
 
-BASE_CUBE_EDGE_M = 0.06
+
+def _composed(world_relative_path: str) -> str:
+    assert world_relative_path.startswith("/World"), world_relative_path
+    return SCENE_ROOT + world_relative_path[len("/World") :]
+
+
+GROUND_PATH = "/World/Ground"  # stage_v1_tabletop.usda deliberately excludes one
+# (docs/PLAN.md Phase 2's own scope, same reasoning as excluding the Franka) --
+# spawned separately here, same as Phase 3 rework's build_rig() will need to.
+CUBE_PATH = _composed(CUBE_PRIM_PATH)
+TABLE_PATH = _composed(TABLE_PRIM_PATH)
+LIGHT_PATH = _composed(KEY_LIGHT_PRIM_PATH)  # KeyLight -- stage_v1.py's own
+# light.intensity/warmth/azimuth_elevation target; FillLight is fixed and
+# non-latent, untouched here; the dome is ambient-only, not a per-sample knob.
+CAMERA_PATH = "/World/Camera"  # freshly spawned, NOT the authored Camera1 prim --
+# Isaac Lab's Camera sensor always spawns its own prim from a spawn config
+# rather than wrapping one that already exists (confirmed building
+# spikes/spike_scene_v1_view.py, docs/PLAN.md Phase 2).
+
+CAMERA_EYE = CAMERAS[0].eye  # Camera1 -- continuity with every prior round's placement
+CAMERA_TARGET = CAMERAS[0].target
+
+BASE_CUBE_EDGE_M = DEFAULT_CUBE_EDGE_M  # 0.06 m -- single source of truth now,
+# was independently hardcoded to the same value before this retarget
 PERTURBED_CUBE_EDGE_M = 0.09
 CUBE_SCALE_READBACK_ATOL_M = 2e-3  # bbox-cache based -- coarser than a solver read-back
 
@@ -287,17 +336,8 @@ LIGHT_DIRECTION_READBACK_ATOL = 1e-3  # unit-vector components
 BASE_CAMERA_JITTER = (0.0, 0.0)
 PERTURBED_CAMERA_JITTER = (0.05, -0.04)
 
-# README §5.2.3: never spiked at all before this addition (docs/PLAN.md Phase
-# 4 follow-up) -- no prior run of this file built a table prim. Positioned
-# beside the cube, not under it, and raised 2mm above the ground plane so it
-# renders in front of the ground in that footprint rather than being hidden
-# under it -- see build_rig()'s docstring.
-TABLE_SIZE_M = (0.3, 0.3, 0.01)
-TABLE_TRANSLATION = (
-    CUBE_TRANSLATION_XY[0] - 0.25,
-    CUBE_TRANSLATION_XY[1] + 0.25,
-    0.5 * TABLE_SIZE_M[2] + 0.002,
-)
+# Table geometry (size, position) now comes from stage_v1_tabletop.usda
+# itself, not a hardcoded constant here -- see build_rig().
 
 BASE_TABLE_ROUGHNESS = 0.5
 PERTURBED_TABLE_ROUGHNESS = 0.95
@@ -419,20 +459,25 @@ class Rig:
 
 
 def build_rig(args: argparse.Namespace) -> Rig:
-    """Build the smallest scene that can answer §7.5: cube + light + table + camera.
+    """Build the rig against scene v1's authored stage (docs/PLAN.md Phase 2b):
+    table, cube, dome + 2 area lights, referenced in from
+    ``scenes/stage_v1_tabletop.usda`` rather than spawned inline -- replacing
+    this spike's own Round 1-5 scene (one ``DistantLight`` and a flat 0.3x0.3
+    material-test table that was never actually load-bearing).
 
-    No ``InteractiveScene`` and no env-namespace templating -- every prim sits
-    at a fixed absolute path this script chose itself, which is the whole
-    reason the ``{ENV_REGEX_NS}`` resolution problem Spike 1 needed does not
-    come up here (docs/PLAN.md Phase 3b).
+    Referenced via ``sim_utils.UsdFileCfg`` at ``SCENE_ROOT`` as a whole prim
+    reference, not by swapping the live USD stage wholesale
+    (``omni.usd...open_stage()``, what ``spikes/spike_scene_v1_view.py`` uses)
+    -- this rig needs physics (``SimulationContext``) and a real camera
+    *sensor* coexisting with the authored content in one scene, which is also
+    exactly how Phase 3 rework will load this file alongside a dynamically
+    spawned Franka. No ``InteractiveScene``/env-namespace templating, same as
+    every prior round -- this spike isolates `full`/`style` write paths, which
+    don't need one.
 
-    The table is new (docs/PLAN.md Phase 4 follow-up): README §5.2.3 names
-    ``table.roughness``/``table.albedo`` as `style` knobs, but no spike ever
-    built a table prim to test them against, unlike every other knob in this
-    file. Positioned beside the cube, raised just above the ground plane, so
-    it renders in-frame without touching the cube's own footprint or z-fighting
-    the ground -- geometry chosen for visibility, not physical plausibility,
-    since nothing here needs the table to be a rigid body.
+    A ground plane is spawned separately: ``stage_v1_tabletop.usda``
+    deliberately excludes one (docs/PLAN.md Phase 2's own scope, same
+    reasoning as excluding the Franka).
     """
     import isaaclab.sim as sim_utils
     import omni.usd
@@ -440,6 +485,11 @@ def build_rig(args: argparse.Namespace) -> Rig:
     from isaaclab.sim import SimulationCfg, SimulationContext
 
     notes: dict[str, Any] = {}
+
+    repo_root = Path(__file__).resolve().parent.parent
+    stage_path = repo_root / "scenes" / "stage_v1_tabletop.usda"
+    if not stage_path.exists():
+        raise FileNotFoundError(f"scene v1 not found: {stage_path}")
 
     render_cfg = None
     try:
@@ -458,25 +508,9 @@ def build_rig(args: argparse.Namespace) -> Rig:
     ground_cfg = sim_utils.GroundPlaneCfg()
     ground_cfg.func(GROUND_PATH, ground_cfg)
 
-    light_cfg = sim_utils.DistantLightCfg(intensity=BASE_LIGHT_INTENSITY, color=(1.0, 1.0, 1.0))
-    light_cfg.func(LIGHT_PATH, light_cfg)
-
-    cube_translation = (*CUBE_TRANSLATION_XY, 0.5 * BASE_CUBE_EDGE_M)
-    cube_cfg = sim_utils.CuboidCfg(
-        size=(BASE_CUBE_EDGE_M, BASE_CUBE_EDGE_M, BASE_CUBE_EDGE_M),
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-        collision_props=sim_utils.CollisionPropertiesCfg(),
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=hue_to_rgb(BASE_CUBE_HUE)),
-    )
-    cube_cfg.func(CUBE_PATH, cube_cfg, translation=cube_translation)
-
-    table_cfg = sim_utils.CuboidCfg(
-        size=TABLE_SIZE_M,
-        visual_material=sim_utils.PreviewSurfaceCfg(
-            diffuse_color=(BASE_TABLE_ALBEDO, BASE_TABLE_ALBEDO, BASE_TABLE_ALBEDO)
-        ),
-    )
-    table_cfg.func(TABLE_PATH, table_cfg, translation=TABLE_TRANSLATION)
+    scene_cfg = sim_utils.UsdFileCfg(usd_path=str(stage_path))
+    scene_cfg.func(SCENE_ROOT, scene_cfg)  # identity transform -- world coords
+    # match exactly what's authored (table centered under the cube, etc.)
 
     camera_cfg = CameraCfg(
         prim_path=CAMERA_PATH,
@@ -495,6 +529,21 @@ def build_rig(args: argparse.Namespace) -> Rig:
     cube_prim = stage.GetPrimAtPath(CUBE_PATH)
     light_prim = stage.GetPrimAtPath(LIGHT_PATH)
     table_prim = stage.GetPrimAtPath(TABLE_PATH)
+
+    # Never fail fast (structural rule 1): if the reference-composition path
+    # guess above is wrong, record what's actually under SCENE_ROOT instead of
+    # crashing blind -- this is new integration surface (an external USD file
+    # referenced alongside spawned content), not yet verified on the pod.
+    if not (cube_prim.IsValid() and table_prim.IsValid() and light_prim.IsValid()):
+        notes["composed_paths_valid"] = {
+            "cube": cube_prim.IsValid(),
+            "table": table_prim.IsValid(),
+            "light": light_prim.IsValid(),
+        }
+        try:
+            notes["scene_root_prim_tree"] = describe_prim_tree(stage.GetPrimAtPath(SCENE_ROOT))
+        except Exception as exc:
+            notes["scene_root_prim_tree"] = f"unavailable: {type(exc).__name__}: {exc}"
 
     cube_shader = None
     try:
@@ -997,15 +1046,30 @@ def respawn_light_and_write_direction(
     (a full USD prim destroy+recreate every capture, not a cheap attribute
     write) -- this is a diagnostic to localize the mechanism, not a candidate
     for the real per-sample write path even if it turns out to work.
+
+    **Retargeted for Phase 2b:** `KeyLight` is now a `RectLight`
+    (`idtb.scenegen.stage_v1`), not the `DistantLightCfg` earlier rounds
+    respawned -- `isaaclab.sim` has no `RectLightCfg` (docs/PLAN.md Phase 2's
+    own docs-research finding), so this authors the raw `pxr.UsdLux.RectLight`
+    directly, matching `stage_v1.py::_define_rect_light`'s own parameters and
+    local translate exactly (a *local* transform, unaffected by this prim's
+    absolute path being under `SCENE_ROOT` now rather than `/World` directly).
     """
-    import isaaclab.sim as sim_utils
+    from pxr import Gf, UsdGeom, UsdLux
 
     stage = rig.light_prim.GetStage()
-    stage.RemovePrim(rig.light_prim.GetPath())
+    light_path = rig.light_prim.GetPath()
+    stage.RemovePrim(light_path)
 
-    light_cfg = sim_utils.DistantLightCfg(intensity=BASE_LIGHT_INTENSITY, color=(1.0, 1.0, 1.0))
-    light_cfg.func(LIGHT_PATH, light_cfg)
-    rig.light_prim = stage.GetPrimAtPath(LIGHT_PATH)
+    key_light_local_translate = (CUBE_XY[0] - 0.3, CUBE_XY[1] - 0.3, TABLE_TOP_Z + 1.0)
+    light = UsdLux.RectLight.Define(stage, light_path)
+    light.CreateIntensityAttr(BASE_LIGHT_INTENSITY)
+    light.CreateWidthAttr(0.4)
+    light.CreateHeightAttr(0.4)
+    light.CreateEnableColorTemperatureAttr(True)
+    light.CreateColorTemperatureAttr(BASE_LIGHT_WARMTH_K)
+    UsdGeom.Xformable(light).AddTranslateOp().Set(Gf.Vec3d(*key_light_local_translate))
+    rig.light_prim = stage.GetPrimAtPath(light_path)
 
     return write_light_direction(rig, azimuth_rad=azimuth_rad, elevation_rad=elevation_rad)
 
