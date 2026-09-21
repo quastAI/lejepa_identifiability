@@ -8,13 +8,15 @@ Milestone 1 is done. `README.md §9`'s Phases 0–3 are all closed: pure layers,
 
 This milestone is README §9's critical path to a first defensible result: **Phase 2 (Scene v1) → Phase 2b (Spike 5 re-gate) → Phase 2c (Scene v2: room shell) → Phase 3 rework (backend against the real scene) → Phase 4 (determinism gate wired into `generate.py`) → Phase 5 (OU generator) → Phase 6 (first dataset) → Phase 7 (analysis, first real number).**
 
+**Status, 2026-09-22: Phases 2, 2b, and 2c are all done. Phase 3 rework is next and has not been started** — see its own section below.
+
 **Reordered, 2026-09-21: Scene v2's room shell moved from Phase 9 (deferred) to Phase 2c (critical path), ahead of Phase 6.** The first real dataset is meant to be the actual target scene — table, Franka, cube, in a room — not a room-less intermediate that would need regenerating once the room lands anyway. Phases 8 and 10 (sweeps, scene v3) stay **Deferred** below — they are where the scientific contribution lives, but nothing in them is actionable before Phase 7 produces a number to compare against.
 
 **Constraint unchanged:** dev machine is macOS, Isaac doesn't run there at all. All Isaac-facing code is written blind; everything touching a GPU runs on the pod. Pod updates are a `curl`+`tar` pull to `/idtb/repo` (no `.git` there) — see `README.md §8.3`.
 
 **Carried forward from Milestone 1 — resolve these as part of Scene v1, not before it starts:**
 
-1. **Re-test `light.azimuth_elevation` and `table.roughness` against scene v1's real light rig and material.** Both are confirmed *blocked* on the spike scene's single `DistantLight` + flat `PreviewSurfaceCfg` — writable, exact, bitwise-deterministic, but zero measurable pixel effect. Scene v1 replaces both with an HDRI dome, area lights, and real PBR materials (README §7.4/§7.5); re-run the same `run_knob_check` recipe before deciding either latent's fate for real.
+1. ~~**Re-test `light.azimuth_elevation` and `table.roughness` against scene v1's real light rig and material.**~~ **Resolved.** `table.roughness` was re-gated against scene v1 and found clean (Phase 2b, README §7.6); `light.azimuth_elevation` stayed practically dead against scene v1 but resolved clean and usable once re-gated against scene v2's room (Phase 2c, README §7.7) — both now fully writable, bitwise-deterministic, and responsive.
 2. **Sweep `write_latent_state()`'s zero-drift claim broadly.** The real `sim.step()` fix (README §5.5) measured zero `read_state()` drift only on the states the contract suite happens to write — well-separated corner values, never an interpenetrating or near-joint-limit configuration. Sample broadly, including deliberately interpenetrating arm-cube states, and assert `read_state()` before/after the step matches to the same `1×10⁻⁴` tolerance the read-back gate already uses. Do this before Phase 6 generates anything real.
 3. **Check whether `cube.y`'s weak per-view signal persists against scene v1's camera rig.** Measured on the spike scene at roughly a third of `cube.x`'s magnitude, and observed dropping to exactly `0.0` under enough compounding attribute writes in one session (README §11). **Revised, 2026-09-21**: the rig this item originally expected to fix it (a second, differently-angled camera) is retired — Phase 2c replaced the whole camera rig with a single head-mounted stereo pair (README §5.3, §3.1). Whether this new rig's different angle helps, hurts, or does nothing to this signal is untested; not something to assume either way without checking.
 4. **Re-run the tier-1 contract suite against scene v1**, not just against the spike scene. README §7.4 already predicts `IsaacSceneBackend`/`writer.py`/`render.py` need rework once scene v1's PBR materials, HDRI/area lights, and camera rig replace the spike scene's shipped Franka + cuboid + `DistantLight`.
@@ -34,7 +36,7 @@ This milestone is README §9's critical path to a first defensible result: **Pha
 
 ## Phase 2 — Scene v1
 
-> README §9: `stage_v1_tabletop.usd` — table, Franka, cube, PBR materials, HDRI + area lights, camera rig (2–3 views). Debug-preset renders look right.
+> README §9: `stage_v1_tabletop.usd` — table, cube, PBR materials, HDRI + area lights, camera rig. Debug-preset renders look right. **Done, 2026-09-21** — the camera rig described in this section's own checklist below (`Camera1`/`Camera2`/`Camera3`, 3 views) was later fully retired in Phase 2c; see that section's note.
 
 - [x] 🤖 **Read the docs first** — done via a research pass over primary sources (openusd.org, NVIDIA Omniverse/Isaac docs, `isaac-sim/IsaacLab` source and issues). Findings baked into the items below; the one that changes Phase 3 rework's plan: **no `RectLightCfg` exists in Isaac Lab's own configclass set** (confirmed absent from `lights_cfg.py`) — area lights are authored directly via `pxr.UsdLux.RectLight`, a real schema Isaac Lab just has no Python wrapper for. And **prefer plain `Camera` sensors over `TiledCamera` for the multi-view rig**: `TiledCamera` has a documented history of cross-talk between multiple simultaneous cameras ([isaac-sim/IsaacLab#1070](https://github.com/isaac-sim/IsaacLab/issues/1070) — outputs overwriting each other, and even after partial fixes, ostensibly-different tiled images that were "the same image just with different noise levels"); it's designed to replicate *one* camera across parallel envs, not hold multiple distinct viewpoints in one env. Unverified from primary docs and worth checking empirically on the pod: whether Isaac Lab 3.0's `TiledCamera` fixes changed this since #1070.
 - [x] 🤖 **Author `scenes/stage_v1_tabletop.usd`** — table, cube, materials, lights, camera rig, as a real USD composition built by `src/idtb/scenegen/` (new package, `python -m idtb.scenegen.build` regenerates the checked-in files). **Scope correction from this bullet's original wording: the Franka is *not* baked into this file.** Its Nucleus asset root is resolved dynamically by `isaaclab_assets.FRANKA_PANDA_CFG` at runtime (`scene.py::_resolve_franka_cfg`), never a fixed literal — baking a reference to it into a checked-in `.usda` would pin exactly the kind of environment-specific path the Decision Register avoids pinning everywhere else. Phase 3 rework keeps spawning the robot as an `ArticulationCfg` alongside this stage, not inside it. Also replaces the spike scene's table, which was never actually load-bearing (the cube always rested on the ground plane, at a position that didn't even overlap the table's footprint) — scene v1's table is real: 0.8×0.6 m top at 0.40 m, cube resting directly on its surface, table centered under the cube by construction.
@@ -50,7 +52,7 @@ This milestone is README §9's critical path to a first defensible result: **Pha
 
 ## Phase 2b — Spike 5 re-gate against scene v1
 
-> README §9: does each `full`/`style` knob still write, read back, move pixels, and stay bitwise deterministic under `standard`, against the real rig?
+> README §9: does each `full`/`style` knob still write, read back, move pixels, and stay bitwise deterministic under `standard`, against the real rig? **Done, 2026-09-21** — one item below is intentionally left unchecked, carried forward to Phase 3 rework rather than blocking this phase's close-out (see its own note).
 
 - [x] 🤖 **Read the docs first if a knob misbehaves against the new rig** — not needed as a separate step; the two real bugs found (below) were both root-caused directly from pod evidence (`cube_prim_tree`/`table_prim_tree` diagnostics, exact-number read-backs) without needing external docs.
 - [x] 🤖 **`spike_dynamic_attrs.py` retargeted at scene v1** — `build_rig()` references `scenes/stage_v1_tabletop.usda` via `sim_utils.UsdFileCfg` at `SCENE_ROOT = "/World/SceneV1"`.
@@ -134,7 +136,7 @@ ruff check .
 
 **Pod:**
 ```
-pytest -m isaac                          # tier-1 contract suite against scene v1
+pytest -m isaac                          # tier-1 contract suite -- Phase 3 rework's job to point this at scene v2 (room-inclusive), not the spike scene it still runs against today
 ./isaaclab.sh -p src/idtb/gen/generate.py --group base --n 100000   # Phase 6
 ```
 
@@ -144,7 +146,7 @@ pytest -m isaac                          # tier-1 contract suite against scene v
 
 ## Deferred
 
-- **README §9 Phases 8 and 10** — the group-matrix and ρ/λ/realism/resolution sweeps, scene v3 (additional manipulands). Not actionable before Phase 7 produces a number to compare against. (Scene v2's room shell is no longer deferred — moved to Phase 2c, on the critical path.)
+- **README §9 Phases 8 and 10** — the group-matrix and ρ/λ/realism/resolution sweeps, scene v3 (additional manipulands). Not actionable before Phase 7 produces a number to compare against. (Scene v2's room shell is no longer deferred — moved to Phase 2c and done, 2026-09-22.)
 - The exact-zero mechanism behind `cube.y`'s weak-signal finding (README §11). The multi-view rig this used to be deferred behind is retired (Phase 2c) — root-causing it further only once Phase 3 rework's real `Camera` sensors show whether it's still live against the new head-stereo angle.
 - Root-causing `cam.jitter`'s residual non-determinism (README §11) beyond "confirmed room-caused, mechanism still unknown" (Phase 2c, §7.7) — worth doing before it's trusted at dataset-generation scale (Phase 4/6), not before then.
 - LeJEPA/SIGReg trainer implementation details beyond "runs against the mock, then against real data" — the authors' own code (`github.com/klindtlab/lejepa-identifiability`) is a live option once Phase 7 starts in earnest.
