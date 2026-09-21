@@ -20,11 +20,22 @@ spawn its own `CameraCfg` sensors, per docs/PLAN.md Phase 3 rework). Uses
 `omni.replicator.core` to render from each existing camera prim directly,
 since Isaac Lab's `Camera`/`CameraCfg` sensor always spawns a fresh camera
 prim from a spawn config rather than wrapping one that already exists.
+
+Renders to a local scratch directory first and copies the result to `--out`
+only once everything is captured: `--out` is typically on the network
+volume (`/idtb/data/...`), and per-frame writes there were measured
+throttled by I/O ("Throttling generation due to I/O bottleneck") on top of
+the render cost itself. `--rt-subframes` defaults low (4) rather than a
+quality-grade accumulation count -- `debug` (README §7.3) only needs a
+recognisable image, not the `standard` preset's determinism, so there is no
+reason to pay for path-tracing accumulation depth here.
 """
 
 from __future__ import annotations
 
 import argparse
+import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -33,10 +44,16 @@ def _parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--out", type=Path, required=True, help="output directory for the rendered PNGs"
+        "--out", type=Path, required=True, help="final output directory for the rendered PNGs"
     )
     parser.add_argument(
         "--resolution", type=int, nargs=2, default=(512, 512), metavar=("WIDTH", "HEIGHT")
+    )
+    parser.add_argument(
+        "--rt-subframes",
+        type=int,
+        default=4,
+        help="path-tracing accumulation subframes per capture (debug preset: low is fine)",
     )
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
@@ -67,19 +84,25 @@ def main() -> None:
     if not camera_paths:
         raise RuntimeError(f"no Camera prims found in {stage_path}")
 
-    args.out.mkdir(parents=True, exist_ok=True)
     width, height = args.resolution
 
-    for camera_path in camera_paths:
-        name = camera_path.rsplit("/", 1)[-1]
-        render_product = rep.create.render_product(camera_path, (width, height))
-        writer = rep.WriterRegistry.get("BasicWriter")
-        writer.initialize(output_dir=str(args.out / name), rgb=True)
-        writer.attach([render_product])
-        rep.orchestrator.step(rt_subframes=32)
-        writer.detach()
-        render_product.destroy()
-        print(f"[spike_scene_v1_view] wrote {args.out / name}")
+    with tempfile.TemporaryDirectory(prefix="spike_scene_v1_view_") as scratch:
+        scratch_dir = Path(scratch)
+        for camera_path in camera_paths:
+            name = camera_path.rsplit("/", 1)[-1]
+            render_product = rep.create.render_product(camera_path, (width, height))
+            writer = rep.WriterRegistry.get("BasicWriter")
+            writer.initialize(output_dir=str(scratch_dir / name), rgb=True)
+            writer.attach([render_product])
+            rep.orchestrator.step(rt_subframes=args.rt_subframes)
+            writer.detach()
+            render_product.destroy()
+            print(f"[spike_scene_v1_view] rendered {name} to local scratch")
+
+        args.out.mkdir(parents=True, exist_ok=True)
+        for name_dir in scratch_dir.iterdir():
+            shutil.copytree(name_dir, args.out / name_dir.name, dirs_exist_ok=True)
+        print(f"[spike_scene_v1_view] copied results to {args.out}")
 
     print(f"[spike_scene_v1_view] done -- {len(camera_paths)} camera(s) rendered to {args.out}")
 
