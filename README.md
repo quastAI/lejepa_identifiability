@@ -469,7 +469,7 @@ what the §7.5 attribute spike is for.
 > albedo, intensity, hue — which is why the table above is entirely continuous), or
 > run the categorical variation as a **separate ablation across datasets**, one
 > dataset per room, compared afterwards, rather than as a dimension inside *z*.
-> Scene v2's room shell (§9, Phase 9) is where this first bites.
+> Scene v2's room shell (§9, Phase 2c) is where this first bites.
 
 > ### Deliberately *not* a latent: sensor noise
 >
@@ -1163,16 +1163,16 @@ Treat the GPU as a batch renderer, not a development environment. Per §1 this i
 | **1** | Infrastructure + spikes | Vendor `isaac-lab` image pulled at the resolved tag; network volume mounted at `/idtb` with caches relocated onto it; `infra/bootstrap.sh` handling the image's uid-1000 user against a root-owned volume; repeatable pod launch. **Spikes 1–4 (§7.2) answered and recorded in §3.** | 2–3 days |
 | **2** | Scene v1 | `stage_v1_tabletop.usd`: table, cube, PBR materials, HDRI dome + 2 area lights, 3-camera rig. **Done, 2026-09-21** — authored by `src/idtb/scenegen/` and confirmed rendering on the pod under `debug`: `Camera1`/`Camera2` look correct (table + cube visible, reasonably lit); `Camera3` (near-top-down) renders near-black, not yet root-caused, carried forward to Phase 2b/3 rework (docs/PLAN.md) rather than blocking here. The Franka is deliberately *not* in this static file — spawned dynamically in Phase 3 rework instead. | 1–2 days |
 | **2b** | Spike 5 — attribute writes | `spikes/spike_dynamic_attrs.py` (§7.5): does each `full`/`style` knob write, read back, move pixels, and stay bitwise deterministic under `standard`? Measured ranges for every new handle. Gates the group design before any of it reaches `SceneBackend`. | 1 day |
+| **2c** | Scene v2 (room) — **reordered ahead of Phase 6, 2026-09-21** | USD reference of an empty room shell around stage v1; relight (the textureless dome likely needs a real HDRI once there's a room to bounce off); re-validate determinism, occlusion statistics, and Phase 2b's knob re-gate against the new lighting. **The first real dataset (Phase 6) should be a clean table + Franka + cube scene in a real room, not the room-less scene v1** — this was originally Phase 9, deferred behind the sweeps; moved here because it's a precondition for Phase 6's dataset, not a follow-on ablation. Not yet started. | 4–6 days |
 | **3** | Backend seam + real backend | `SceneBackend` protocol and `MockSceneBackend`, designed against the spike's measurements rather than against documentation; then `IsaacSceneBackend`: handle resolution by name, state writer, read-back assertions confirming every write landed. Collision and visibility diagnostics. Tier-1 contract suite green against Isaac. **Done, 2026-09-18** — `pytest -m isaac`: 30 passed, 2 skipped, 0 failed, against the spike scene (§7.5's scope note: re-verify once scene v1's own materials/lights/cameras replace it). | 2 days |
 | **4** | Determinism gate | Deterministic capture path; the §7.1 acceptance test passing for every preset intended for dataset use, called by `generate.py` itself and not only by the test suite. | 1–2 days |
 | **5** | OU generator | Sharded writer storing (x, x′, z, z′, visibility, collision, ρ, seed, intrinsics); per-shard checkpointing. | 2 days |
 | **6** | First dataset | ~100k pairs at `standard`, ρ_task = 0.95 (a starting point, not a finding), **`base` group only, no style variation** — the clean control every later configuration is compared against. Visual audit of a random sample grid. | 0.5–1 day compute |
 | **7** | Analysis | LeJEPA/SIGReg training; metrics: R²(h→z), R²(z→h), ‖Q̂ᵀQ̂−I‖_F/√n, ε, δ, bound D + (ε+D)². **First real number.** | 2–3 days |
 | **8** | Sweeps | **The group matrix first** — `base+style`, `full`, `full+style` against Phase 6's `base` control, which is what separates "identifiability got harder because *n* grew" from "because style varies"; each is one generation run. Then ρ ∈ {0.3 … 0.99}; λ grid; render-realism ablation; gennorm α latent-distribution sweep (converse test); **ρ_style sweep testing §5.4.1's predicted crossing at ρ_task²**; resolution ablation. | 3–5 days + compute |
-| **9** | Scene v2 (room) | USD reference of a room shell around stage v1; relight; re-validate determinism and occlusion statistics; regenerate and re-measure. | 4–6 days |
 | **10** | Scene v3 (objects) | Add manipulands one at a time; each adds 2–3 latent dims. Study identifiability vs. *n*, and the *m ≠ n* regime the paper leaves open. | ongoing |
 
-**Critical path to a first defensible result: Phases 0–7, approximately two weeks.** Phases 8–10 are where the scientific contribution lives.
+**Critical path to a first defensible result: Phases 0–2c, 3–7, approximately two and a half weeks.** Scene v2's room shell (Phase 2c) moved onto this path, 2026-09-21 — the first dataset is meant to be the real target scene (table + Franka + cube, in a room), not a room-less intermediate. Phases 8 and 10 remain where the scientific contribution lives, run after a first number exists to compare against.
 
 Note that Phase 0b has no dependency on Phase 0 — the pure layers can be built while the GPU question is still open. This is the practical payoff of the seam: the version decision blocks almost nothing.
 
