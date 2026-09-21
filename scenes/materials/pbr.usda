@@ -1,34 +1,37 @@
 #usda 1.0
 
-def Scope "Looks"
+over "World"
 {
-    def Material "TableMaterial"
+    def Scope "Looks"
     {
-        token outputs:surface.connect = </Looks/TableMaterial/Shader.outputs:surface>
-
-        def Shader "Shader"
+        def Material "TableMaterial"
         {
-            uniform token info:id = "UsdPreviewSurface"
-            color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
-            float inputs:metallic = 0
-            float inputs:opacity = 1
-            float inputs:roughness = 0.75
-            token outputs:surface
+            token outputs:surface.connect = </World/Looks/TableMaterial/Shader.outputs:surface>
+
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+                float inputs:metallic = 0
+                float inputs:opacity = 1
+                float inputs:roughness = 0.75
+                token outputs:surface
+            }
         }
-    }
 
-    def Material "CubeMaterial"
-    {
-        token outputs:surface.connect = </Looks/CubeMaterial/Shader.outputs:surface>
-
-        def Shader "Shader"
+        def Material "CubeMaterial"
         {
-            uniform token info:id = "UsdPreviewSurface"
-            color3f inputs:diffuseColor = (0.85, 0.13, 0.11)
-            float inputs:metallic = 0
-            float inputs:opacity = 1
-            float inputs:roughness = 0.4
-            token outputs:surface
+            token outputs:surface.connect = </World/Looks/CubeMaterial/Shader.outputs:surface>
+
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.85, 0.13, 0.11)
+                float inputs:metallic = 0
+                float inputs:opacity = 1
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
         }
     }
 }

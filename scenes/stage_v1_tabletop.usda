@@ -14,7 +14,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
-        rel material:binding = </Looks/TableMaterial>
+        rel material:binding = </World/Looks/TableMaterial>
         double size = 1
         float3 xformOp:scale = (0.8, 0.6, 0.04)
         double3 xformOp:translate = (0.5, 0, 0.4)
@@ -25,7 +25,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
-        rel material:binding = </Looks/TableMaterial>
+        rel material:binding = </World/Looks/TableMaterial>
         double size = 1
         float3 xformOp:scale = (0.1, 0.1, 0.38)
         double3 xformOp:translate = (0.5, 0, 0.19)
@@ -36,7 +36,7 @@ def Xform "World"
         prepend apiSchemas = ["MaterialBindingAPI"]
     )
     {
-        rel material:binding = </Looks/CubeMaterial>
+        rel material:binding = </World/Looks/CubeMaterial>
         double size = 1
         float3 xformOp:scale = (0.06, 0.06, 0.06)
         double3 xformOp:translate = (0.5, 0, 0.45000000000000007)

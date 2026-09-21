@@ -21,7 +21,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-LOOKS_SCOPE = "/Looks"
+#: Under `/World`, not a stage-root sibling of it -- `stage_v1.py` sets
+#: `/World` as the stage's *default prim*, and a `sim_utils.UsdFileCfg`
+#: reference (Phase 2b, Phase 3 rework) only pulls in the default prim's own
+#: subtree, remapped under wherever it's referenced. Materials authored
+#: outside that subtree (the original `/Looks`) never get pulled in at all --
+#: confirmed on the pod: `MaterialBindingAPI(cube_prim).ComputeBoundMaterial()`
+#: returned nothing, not because the binding was wrong, but because
+#: `/Looks/CubeMaterial` doesn't exist anywhere in the composed result.
+LOOKS_SCOPE = "/World/Looks"
 TABLE_MATERIAL_PATH = f"{LOOKS_SCOPE}/TableMaterial"
 CUBE_MATERIAL_PATH = f"{LOOKS_SCOPE}/CubeMaterial"
 
