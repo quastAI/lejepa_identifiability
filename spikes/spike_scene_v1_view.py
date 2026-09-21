@@ -25,35 +25,33 @@ Renders to a local scratch directory first and copies the result to `--out`
 only once everything is captured: `--out` is typically on the network
 volume (`/idtb/data/...`), and per-frame writes there were measured
 throttled by I/O ("Throttling generation due to I/O bottleneck") on top of
-the render cost itself. `--rt-subframes` defaults low (4) rather than a
-quality-grade accumulation count -- `debug` (README §7.3) only needs a
-recognisable image, not the `standard` preset's determinism, so there is no
-reason to pay for path-tracing accumulation depth here.
+the render cost itself.
 
-**Confirmed on the pod, twice, in two different failure modes:**
+**Three failed attempts with `omni.replicator.core`, confirmed on the pod,
+before switching approach entirely:**
 
-1. An earlier revision omitted `rep.orchestrator.set_capture_on_play(False)`
-   (README §4.4 already listed it as part of the render-control API
-   surface). Without it, Replicator's default on-timeline-play capture
-   trigger fired continuously once `open_stage()` auto-started the
-   timeline -- observed as 179k+ files in `--out`.
-2. Adding that call was not sufficient on its own: a `render_product`'s
-   `hydra_texture` renders *continuously* the moment it's created --
-   independent of Replicator's own frame-trigger machinery entirely -- and
-   the writer kept capturing every one of those live-render ticks. Fixed
-   per NVIDIA's own SDG-workflow documentation
-   (docs.isaacsim.omniverse.nvidia.com/6.0.0/replicator_tutorials/tutorial_replicator_sdg_workflows.html):
-   `hydra_texture.set_updates_enabled(False)` immediately after creating the
-   render product, `True` only for the duration of the intended `step()`
-   call, `False` again right after, and `rep.orchestrator.wait_until_complete()`
-   before tearing anything down -- observed as 70k+ files (on local `/tmp`
-   this time, not the network volume, but the same unbounded loop) with
-   only fix 1 applied.
+1. Omitting `rep.orchestrator.set_capture_on_play(False)` left Replicator's
+   default on-timeline-play capture trigger firing continuously once
+   `open_stage()` auto-started the timeline -- 179k+ files in `--out`.
+2. Adding that call was not sufficient: a `render_product`'s `hydra_texture`
+   renders *continuously* the moment it's created, independent of
+   Replicator's own frame-trigger machinery entirely -- 70k+ files even
+   with `hydra_texture.set_updates_enabled()` gating applied around the
+   `step()` call.
+3. Still climbing after both fixes.
+
+Rather than keep patching Replicator's writer/render-product/trigger
+machinery, this now uses `omni.kit.viewport.utility.capture_viewport_to_file`
+-- a synchronous, purpose-built one-shot capture (`helper.wait_for_result()`
+resolves exactly once, no continuous-rendering or trigger-loop semantics to
+fight) -- with the viewport's `camera_path` reassigned per capture instead
+of spawning a `render_product` per camera at all.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
@@ -70,10 +68,11 @@ def _parse_args() -> argparse.Namespace:
         "--resolution", type=int, nargs=2, default=(512, 512), metavar=("WIDTH", "HEIGHT")
     )
     parser.add_argument(
-        "--rt-subframes",
+        "--settle-frames",
         type=int,
-        default=4,
-        help="path-tracing accumulation subframes per capture (debug preset: low is fine)",
+        default=30,
+        help="app updates to pump after switching camera, before capturing (lets the "
+        "path tracer converge on the new view)",
     )
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
@@ -83,10 +82,10 @@ def main() -> None:
     args = _parse_args()
     from idtb.sim.app import launch
 
-    launch(args)  # boots SimulationApp -- must precede every isaaclab/omni/pxr import below
+    simulation_app = launch(args)  # must precede every isaaclab/omni/pxr import below
 
-    import omni.replicator.core as rep
     import omni.usd
+    from omni.kit.viewport.utility import capture_viewport_to_file, get_active_viewport
 
     repo_root = Path(__file__).resolve().parents[1]
     stage_path = repo_root / "scenes" / "stage_v1_tabletop.usda"
@@ -98,44 +97,47 @@ def main() -> None:
         raise RuntimeError(f"omni.usd failed to open {stage_path}")
     stage = context.get_stage()
 
-    # Without this, the writer's default on_frame trigger fires on every
-    # tick of the timeline open_stage() just auto-started, not just the
-    # explicit step() below -- confirmed on the pod as an unbounded,
-    # still-growing capture loop (see module docstring).
-    rep.orchestrator.set_capture_on_play(False)
-
     camera_paths = sorted(
         str(prim.GetPath()) for prim in stage.Traverse() if prim.GetTypeName() == "Camera"
     )
     if not camera_paths:
         raise RuntimeError(f"no Camera prims found in {stage_path}")
 
+    viewport = get_active_viewport()
+    if viewport is None:
+        raise RuntimeError("no active viewport -- headless Kit did not create one")
+
     width, height = args.resolution
+    try:
+        viewport.resolution = (width, height)
+    except Exception as exc:  # not load-bearing -- default viewport size still captures
+        print(f"[spike_scene_v1_view] could not set viewport resolution ({exc}); using default")
+
+    for _ in range(args.settle_frames):  # let the freshly opened stage render in
+        simulation_app.update()
 
     with tempfile.TemporaryDirectory(prefix="spike_scene_v1_view_") as scratch:
         scratch_dir = Path(scratch)
         for camera_path in camera_paths:
             name = camera_path.rsplit("/", 1)[-1]
-            render_product = rep.create.render_product(camera_path, (width, height))
-            # Off until the moment of capture -- a render product's hydra
-            # texture renders continuously the instant it exists, entirely
-            # independent of Replicator's own frame-trigger system (see
-            # module docstring, failure mode 2).
-            render_product.hydra_texture.set_updates_enabled(False)
-            writer = rep.WriterRegistry.get("BasicWriter")
-            writer.initialize(output_dir=str(scratch_dir / name), rgb=True)
-            writer.attach([render_product])
-            render_product.hydra_texture.set_updates_enabled(True)
-            rep.orchestrator.step(rt_subframes=args.rt_subframes)
-            rep.orchestrator.wait_until_complete()
-            render_product.hydra_texture.set_updates_enabled(False)
-            writer.detach()
-            render_product.destroy()
-            print(f"[spike_scene_v1_view] rendered {name} to local scratch")
+            viewport.camera_path = camera_path
+            for _ in range(args.settle_frames):
+                simulation_app.update()  # let the new camera's view actually render
+
+            async def _capture(file_path: Path = scratch_dir / f"{name}.png") -> None:
+                helper = capture_viewport_to_file(viewport, file_path=str(file_path))
+                await helper.wait_for_result()
+
+            task = asyncio.ensure_future(_capture())
+            while not task.done():
+                simulation_app.update()
+            task.result()  # re-raises if _capture() failed
+
+            print(f"[spike_scene_v1_view] captured {name}")
 
         args.out.mkdir(parents=True, exist_ok=True)
-        for name_dir in scratch_dir.iterdir():
-            shutil.copytree(name_dir, args.out / name_dir.name, dirs_exist_ok=True)
+        for png in scratch_dir.iterdir():
+            shutil.copy2(png, args.out / png.name)
         print(f"[spike_scene_v1_view] copied results to {args.out}")
 
     print(f"[spike_scene_v1_view] done -- {len(camera_paths)} camera(s) rendered to {args.out}")
