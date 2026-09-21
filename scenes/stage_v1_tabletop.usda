@@ -79,6 +79,7 @@ def Xform "World"
         def Camera "CameraL"
         {
             float2 clippingRange = (0.01, 100)
+            float focalLength = 15.244857
             matrix4d xformOp:transform = ( (-0.6554701490532165, 0.7552210826639799, -5.5511151231257815e-17, 0), (-0.5819805015540729, -0.5051114896767804, 0.6373076798590877, 0), (0.48130819597324925, 0.41773615990999574, 0.7706094478999244, -0), (0.8747487373415292, 0.32525126265847093, 1.1, 1) )
             uniform token[] xformOpOrder = ["xformOp:transform"]
         }
@@ -86,6 +87,7 @@ def Xform "World"
         def Camera "CameraR"
         {
             float2 clippingRange = (0.01, 100)
+            float focalLength = 15.244857
             matrix4d xformOp:transform = ( (-0.7552210826639799, 0.6554701490532165, 5.5511151231257815e-17, 0), (-0.5051114896767804, -0.5819805015540729, 0.6373076798590877, 0), (0.41773615990999574, 0.48130819597324925, 0.7706094478999244, -0), (0.8252512626584708, 0.3747487373415293, 1.1, 1) )
             uniform token[] xformOpOrder = ["xformOp:transform"]
         }

@@ -162,7 +162,23 @@ def _look_at_transform(eye: tuple[float, float, float], target: tuple[float, flo
     return view.GetInverse()
 
 
+#: `UsdGeom.Camera`'s schema fallback lens (50 mm focal length over a
+#: 20.955 mm aperture) is a ~24-degree horizontal FOV -- a telephoto lens,
+#: confirmed by docs/PLAN.md Phase 2c's pod session to see only a ~0.5x0.5 m
+#: patch of the table plane from the head-stereo rig's position, too tight
+#: to frame the table itself, let alone the Franka reaching into it once
+#: Phase 3 rework spawns it. 69 degrees matches a real RealSense D435's RGB
+#: stream (its depth stream is wider still, ~87 degrees, but the RGB frame
+#: is the more realistic stand-in for what a policy actually trains on) --
+#: confirmed locally to cover a ~2x2 m footprint on the table plane from
+#: this rig's position, generous room around the table for wherever the
+#: arm ends up.
+_HORIZONTAL_FOV_DEG = 69.0
+
+
 def _define_camera(stage: Any, spec: CameraSpec) -> Any:
+    import math
+
     from pxr import Gf, UsdGeom
 
     path = f"{CAMERA_PARENT_PATH}/{spec.name}"
@@ -177,6 +193,12 @@ def _define_camera(stage: Any, spec: CameraSpec) -> Any:
     # tabletop-and-a-room-sized scene either way, independent of exactly
     # how far any future camera sits from its target.
     camera.CreateClippingRangeAttr(Gf.Vec2f(0.01, 100.0))
+    # Solved from the *authored* horizontal aperture (the schema fallback,
+    # left untouched) rather than a hardcoded aperture value, so this stays
+    # correct even if a future change authors a different sensor aperture.
+    aperture = camera.GetHorizontalApertureAttr().Get()
+    focal_length = aperture / (2.0 * math.tan(math.radians(_HORIZONTAL_FOV_DEG / 2.0)))
+    camera.CreateFocalLengthAttr(focal_length)
     return camera
 
 

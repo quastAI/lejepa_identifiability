@@ -158,6 +158,21 @@ def test_camera_rig_is_a_realistic_head_mounted_stereo_pair():
     assert left[2] == pytest.approx(right[2], abs=1e-9)
 
 
+def test_camera_fov_is_wide_enough_to_frame_the_table(pxr):
+    """docs/PLAN.md Phase 2c: the schema's fallback lens (~24 degrees
+    horizontal, a telephoto FOV) was confirmed on the pod to see only a
+    ~0.5x0.5 m patch of the table plane from this rig's position -- tighter
+    than the table itself, let alone room for the Franka once Phase 3
+    rework spawns it. `_define_camera` now solves for a real RealSense
+    D435-RGB-class ~69-degree horizontal FOV instead."""
+    stage, _ = build_stage_v1()
+    for spec in CAMERAS:
+        camera_prim = stage.GetPrimAtPath(f"/World/Cameras/{spec.name}")
+        gf_cam = pxr.UsdGeom.Camera(camera_prim).GetCamera()
+        fov = gf_cam.GetFieldOfView(pxr.Gf.Camera.FOVHorizontal)
+        assert fov == pytest.approx(69.0, abs=0.5), f"{spec.name}: FOV {fov} deg"
+
+
 def test_camera_transforms_are_finite_even_for_top_down_views(pxr):
     """Regression: `SetLookAt` with world-up `(0,0,1)` is degenerate for a
     near-vertical view direction -- the original rig's near-top-down
