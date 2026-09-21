@@ -513,9 +513,11 @@ def build_rig(args: argparse.Namespace) -> Rig:
     notes: dict[str, Any] = {}
 
     repo_root = Path(__file__).resolve().parent.parent
-    stage_path = repo_root / "scenes" / "stage_v2_room.usda"
+    stage_filename = "stage_v2_room.usda" if args.stage == "v2" else "stage_v1_tabletop.usda"
+    stage_path = repo_root / "scenes" / stage_filename
+    notes["stage"] = args.stage
     if not stage_path.exists():
-        raise FileNotFoundError(f"scene v2 not found: {stage_path}")
+        raise FileNotFoundError(f"scene {args.stage} not found: {stage_path}")
 
     render_cfg = None
     try:
@@ -1298,6 +1300,17 @@ def main() -> int:
         help="save the a1/b1/b2/a2 frames determinism_report compares, for a few "
         "representative knobs, as <out>/frames/*.pt -- so the back-to-back noise found "
         "on cube.hue/light.*/cam.jitter can be inspected directly instead of guessed at",
+    )
+    parser.add_argument(
+        "--stage",
+        choices=["v1", "v2"],
+        default="v2",
+        help="docs/PLAN.md Phase 2c: which authored stage build_rig() references -- "
+        "'v2' (default) is the room-inclusive scenes/stage_v2_room.usda; 'v1' is the "
+        "room-less scenes/stage_v1_tabletop.usda, kept only as an isolating A/B toggle "
+        "for exactly one question: does a finding change because of the room, or "
+        "because of the (unrelated) camera-rig redesign that landed in the same phase? "
+        "Both reference the same camera positions either way.",
     )
     parser.add_argument(
         "--extra-preset",
